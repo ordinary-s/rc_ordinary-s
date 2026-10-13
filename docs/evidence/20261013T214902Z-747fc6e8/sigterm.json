@@ -1,0 +1,15 @@
+{
+  "scenarios": [
+    {
+      "details": {
+        "attempt_state": "UNKNOWN",
+        "http_attempts": 1,
+        "mock_calls": 1,
+        "status_after_restart": "UNCERTAIN",
+        "task_id": "a9a0c671-214f-4a94-b645-0ca6002a0440"
+      },
+      "name": "sigterm_interrupts_inflight_http_and_redelivery_does_not_repeat",
+      "passed": true
+    }
+  ]
+}

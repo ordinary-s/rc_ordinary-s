@@ -1,0 +1,12 @@
+app-1  | time=2026-10-13T21:50:09.252Z level=INFO msg="HTTP server started" addr=:8080
+app-1  | time=2026-10-13T21:50:26.581Z level=INFO msg="notification accepted" trace_id=25d91580-44c3-4b69-83f0-d4f4a02612f1 task_id=19d065a0-b578-4c77-a6ca-4677c49f989e destination_id=mock-target result=ACCEPTED created=true
+app-1  | time=2026-10-13T21:50:29.657Z level=WARN msg="outbox send not confirmed" event_id=19d065a0-b578-4c77-a6ca-4677c49f989e task_id=19d065a0-b578-4c77-a6ca-4677c49f989e trace_id=25d91580-44c3-4b69-83f0-d4f4a02612f1 retry_in_ms=1000
+app-1  | time="2026-10-13T21:50:30Z" level=error msg="get consumer list of group from broker error" broker="broker:10911" consumerGroup=notification_delivery_workers underlayError="dial tcp: lookup broker on 127.0.0.11:53: no such host"
+app-1  | time=2026-10-13T21:50:30.758Z level=WARN msg="outbox send not confirmed" event_id=19d065a0-b578-4c77-a6ca-4677c49f989e task_id=19d065a0-b578-4c77-a6ca-4677c49f989e trace_id=25d91580-44c3-4b69-83f0-d4f4a02612f1 retry_in_ms=2000
+app-1  | time=2026-10-13T21:50:42.272Z level=INFO msg="notification processing finished" trace_id=25d91580-44c3-4b69-83f0-d4f4a02612f1 task_id=19d065a0-b578-4c77-a6ca-4677c49f989e destination_id=mock-target http_attempts=0 mq_reconsume=0 result=EXPIRED code=TASK_EXPIRED cost_ms=12
+app-1  | time=2026-10-13T21:50:43.512Z level=INFO msg="notification accepted" trace_id=e5dc69a3-75c8-4737-9fdb-d95fbf9c54f6 task_id=e523d895-50b6-40fe-9c3a-1b2c77b9e430 destination_id=mock-target result=ACCEPTED created=true
+app-1  | time=2026-10-13T21:50:43.592Z level=INFO msg="notification processing finished" trace_id=e5dc69a3-75c8-4737-9fdb-d95fbf9c54f6 task_id=e523d895-50b6-40fe-9c3a-1b2c77b9e430 destination_id=mock-target http_attempts=1 mq_reconsume=0 result=DELIVERED code=HTTP_2XX cost_ms=39
+app-1  | time=2026-10-13T21:50:53.364Z level=INFO msg="notification accepted" trace_id=1b6c3cfe-f344-4f64-b95e-27fe613defcd task_id=a9a0c671-214f-4a94-b645-0ca6002a0440 destination_id=mock-target result=ACCEPTED created=true
+app-1  | time=2026-10-13T21:50:54.070Z level=INFO msg="shutdown signal received"
+app-1  | time=2026-10-13T21:50:54.070Z level=ERROR msg="notification execution incomplete" trace_id=1b6c3cfe-f344-4f64-b95e-27fe613defcd task_id=a9a0c671-214f-4a94-b645-0ca6002a0440 destination_id="" http_attempts="" mq_reconsume=0 result=EXECUTION_ERROR code=EXECUTION_ERROR cost_ms=626 error_type=*errors.errorString
+app-1  | time=2026-10-13T21:50:54.071Z level=INFO msg="server stopped"

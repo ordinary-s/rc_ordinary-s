@@ -1,0 +1,189 @@
+services:
+  mysql:
+    image: mysql:8.4.8@sha256:2952e3be7807f06fc18de50b3ea1a632d5c70d63482ff7d7376fe3aa8999babf
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-notification-root-local}
+      MYSQL_DATABASE: notifications
+      MYSQL_USER: notification_app
+      MYSQL_PASSWORD: ${MYSQL_APP_PASSWORD:-notification-app-local}
+    command: [--default-time-zone=+00:00, --character-set-server=utf8mb4, --collation-server=utf8mb4_0900_bin, --innodb-buffer-pool-size=256M, --max-connections=200]
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./scripts/mysql-runtime-user.sh:/docker-entrypoint-initdb.d/10-runtime-user.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+      start_period: 10s
+    mem_limit: 1g
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+  namesrv:
+    image: apache/rocketmq:5.5.0@sha256:7e8f6c9dbd9df742ed26ba69c00d4ad69e2f86a56f3ca7782ff8144dd0798132
+    command: ["nameserver"]
+    environment:
+      HEAP_OPTS: -Xms256m -Xmx256m -Xmn128m
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9876'"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+      start_period: 10s
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+  broker-store-init:
+    image: apache/rocketmq:5.5.0@sha256:7e8f6c9dbd9df742ed26ba69c00d4ad69e2f86a56f3ca7782ff8144dd0798132
+    user: "0:0"
+    entrypoint: ["sh", "-c"]
+    command: ["mkdir -p /store && chown -R 3000:3000 /store"]
+    volumes:
+      - rocketmq-data:/store
+    restart: "no"
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "2"}
+  broker:
+    image: apache/rocketmq:5.5.0@sha256:7e8f6c9dbd9df742ed26ba69c00d4ad69e2f86a56f3ca7782ff8144dd0798132
+    command: ["broker", "-n", "namesrv:9876", "-c", "/home/rocketmq/rocketmq-5.5.0/conf/broker.conf"]
+    environment:
+      HEAP_OPTS: -Xms512m -Xmx512m -Xmn256m -XX:MaxDirectMemorySize=256m
+    depends_on:
+      broker-store-init:
+        condition: service_completed_successfully
+      namesrv:
+        condition: service_healthy
+    volumes:
+      - rocketmq-data:/home/rocketmq/store
+      - ./docker/broker.conf:/home/rocketmq/rocketmq-5.5.0/conf/broker.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/10911'"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 15s
+    mem_limit: 1536m
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+  mq-init:
+    image: apache/rocketmq:5.5.0@sha256:7e8f6c9dbd9df742ed26ba69c00d4ad69e2f86a56f3ca7782ff8144dd0798132
+    entrypoint: ["sh", "/scripts/init-rocketmq.sh"]
+    environment:
+      NAMESRV_ADDR: namesrv:9876
+      ROCKETMQ_TOPIC: notification_delivery
+      ROCKETMQ_CONSUMER_GROUP: notification_delivery_workers
+    volumes:
+      - ./scripts/init-rocketmq.sh:/scripts/init-rocketmq.sh:ro
+    depends_on:
+      broker:
+        condition: service_healthy
+    restart: "no"
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "2"}
+  migrate:
+    image: ${APP_IMAGE:-rc-notification:0.1.0}
+    build: {context: ., target: runtime}
+    entrypoint: ["/app/migrate"]
+    environment:
+      DB_MIGRATION_DSN: "root:${MYSQL_ROOT_PASSWORD:-notification-root-local}@tcp(mysql:3306)/notifications?parseTime=true&loc=UTC&charset=utf8mb4"
+      DESTINATION_ID: mock-target
+      DESTINATION_URL: http://mock-target:8090/notify
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "2"}
+  mock-target:
+    image: ${APP_IMAGE:-rc-notification:0.1.0}
+    build: {context: ., target: runtime}
+    entrypoint: ["/app/mock-target"]
+    healthcheck:
+      test: ["CMD", "/app/healthcheck", "http://localhost:8090/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 2s
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "2"}
+  app:
+    image: ${APP_IMAGE:-rc-notification:0.1.0}
+    build: {context: ., target: runtime}
+    environment:
+      HTTP_ADDR: :8080
+      DB_DSN: "notification_app:${MYSQL_APP_PASSWORD:-notification-app-local}@tcp(mysql:3306)/notifications?parseTime=true&loc=UTC&charset=utf8mb4"
+      ROCKETMQ_NAMESRV: namesrv:9876
+      ROCKETMQ_BROKER_ADDR: broker:10911
+      ROCKETMQ_TOPIC: notification_delivery
+      ROCKETMQ_PRODUCER_GROUP: notification_outbox_publisher
+      ROCKETMQ_CONSUMER_GROUP: notification_delivery_workers
+      MQ_MAX_RECONSUME: ${MQ_MAX_RECONSUME:-8}
+      ROCKETMQ_GO_LOG_LEVEL: error
+      CLIENT_ID: demo-client
+      CLIENT_TOKEN: ${CLIENT_TOKEN:-demo-client-token}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-demo-admin-token}
+      DESTINATION_ID: mock-target
+      DESTINATION_URL: http://mock-target:8090/notify
+      ALLOWED_TARGET: http://mock-target:8090
+      CONSUMER_CONCURRENCY: 4
+      HTTP_TIMEOUT: 10s
+      HTTP_BACKOFFS: 10s,20s
+      TASK_TTL: 30m
+      OUTBOX_POLL: 1s
+    ports:
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8080}:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+      mock-target:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      mq-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/app/healthcheck", "http://localhost:8080/readyz"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+  test-runner:
+    image: ${TEST_IMAGE:-rc-notification-test:0.1.0}
+    build: {context: ., target: test-runner}
+    profiles: ["verify"]
+    environment:
+      TEST_API_URL: http://app:8080
+      TEST_CLIENT_TOKEN: ${CLIENT_TOKEN:-demo-client-token}
+      TEST_ADMIN_TOKEN: ${ADMIN_TOKEN:-demo-admin-token}
+      TEST_DB_DSN: "root:${MYSQL_ROOT_PASSWORD:-notification-root-local}@tcp(mysql:3306)/notifications?parseTime=true&loc=UTC&charset=utf8mb4"
+      TEST_MOCK_URL: http://mock-target:8090
+      ROCKETMQ_NAMESRV: namesrv:9876
+      ROCKETMQ_TOPIC: notification_delivery
+      TEST_REPORT: /reports/integration.json
+      TEST_CONTROL_DIR: /reports
+    volumes:
+      - ./reports/${VERIFY_RUN_ID:-local}:/reports
+    depends_on:
+      app:
+        condition: service_healthy
+    mem_limit: 2g
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "2"}
+volumes:
+  mysql-data:
+  rocketmq-data:

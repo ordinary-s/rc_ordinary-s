@@ -1,0 +1,42 @@
+run_id=20261013T214902Z-747fc6e8
+Docker Desktop=4.69.0
+Docker Engine=29.4.0
+Docker Compose=5.1.1
+Docker target=linux/amd64
+Go=1.27.2
+MySQL=8.4.8
+Apache RocketMQ=5.5.0
+rocketmq-client-go/v2=2.1.2
+app_image=rc-notification:0.1.0
+app_image_id=sha256:f62dac0fe3a176739b51bb0ca7e2ce6f2ceb65a948c565f289c81ddfa4f46488
+test_image=rc-notification-test:0.1.0
+test_image_id=sha256:b24d5810bca925365593c60f50bce3ce5e9d4fe30d0a23912afe7e1083709769
+verification_started_utc=2026-10-13T21:49:02Z
+verification_finished_utc=2026-10-13T21:53:44Z
+full_test_started_utc=2026-10-13T21:51:58Z
+full_test_finished_utc=2026-10-13T21:53:36Z
+verify_command=Set-Location 'D:\rc_notification'; .\scripts\verify-docker.ps1
+verify_exit_code=0
+gofmt_exit_code=0
+go_vet_exit_code=0
+go_test_exit_code=0
+go_race_exit_code=0
+integration_compile_exit_code=0
+real_integration_exit_code=0
+broker_outage_integration_exit_code=0
+sigterm_integration_exit_code=0
+log_secret_scan_exit_code=0
+log_context_scan_exit_code=0
+cleanup_exit_code=0
+result=PASS
+
+Pinned images:
+golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61
+debian:13.1-slim@sha256:a347fd7510ee31a84387619a492ad6c8eb0af2f2682b916ff3e643eb076f925a
+mysql:8.4.8@sha256:2952e3be7807f06fc18de50b3ea1a632d5c70d63482ff7d7376fe3aa8999babf
+apache/rocketmq:5.5.0@sha256:7e8f6c9dbd9df742ed26ba69c00d4ad69e2f86a56f3ca7782ff8144dd0798132
+
+WSL:
+D: mount at /mnt/d confirmed by findmnt as D:\ on writable 9p mount
+bash -n scripts/verify-docker.sh exit_code=0
+WSL docker info exit_code=1; Docker Desktop WSL integration is disabled in this distro

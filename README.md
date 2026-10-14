@@ -2,7 +2,7 @@
 
 这是一个可运行、可复现的 Go 通知服务作业实现：HTTP API 将通知任务与 Outbox 事件写入同一个 MySQL 事务；Publisher 将小型事件投递到真实 RocketMQ；同一 Go 进程中的消费者按任务执行外部 HTTP。当前服务按单实例设计。
 
-文档源码基线为 `9ed109d`。完整设计、候选来源和实现差异已分别整理，阅读入口见 [docs/README.md](docs/README.md)。**已归档 Docker 验收 `20261014T063922Z-6c5cb01c` 为 PASS**；运行日期、命令、真实场景与保证范围见[验收记录](docs/verification.md)。该结论对应指定运行，不将本次文档修订称为新一次 Docker 通过。
+文档源码基线为 `9ed109d`。完整设计、候选来源和实现差异已分别整理，阅读入口见下方[文档导航](#文档导航)。**已归档 Docker 验收 `20261014T063922Z-6c5cb01c` 为 PASS**；运行日期、命令、真实场景与保证范围见[验收记录](docs/verification.md)。该结论对应指定运行，不将本次文档修订称为新一次 Docker 通过。
 
 ## 边界与语义
 
@@ -117,15 +117,19 @@ docker compose -p rcnotif-dev exec broker /home/rocketmq/rocketmq-5.5.0/bin/mqad
 
 ## 文档导航
 
-- [系统设计和状态边界](docs/design.md)
-- [作业问题逐项回答](docs/assignment-answers.md)
-- [讨论决定与替代方案](docs/decisions.md)
-- [题目/补充约束映射](docs/requirements-mapping.md)
-- [AI 使用说明](AI_USAGE.md)
-- [Go/MySQL/RocketMQ 工程规范](docs/standards.md)
-- [Docker 验收记录与证据链接](docs/verification.md)
-- [候选包逐章对齐与历史规则](docs/reference-alignment.md)
-- [实现一致性审查与残余差异](docs/implementation-review.md)
+| 阅读目的 | 文档 | 内容 |
+| --- | --- | --- |
+| 理解完整架构与故障处理 | [完整设计](docs/design.md) | 17 节覆盖边界、流程、事务、幂等、Outbox、消费、状态机、三次尝试、人工处理、安全与演进。 |
+| 按作业问题阅读设计判断 | [题目逐项答复](docs/assignment-answers.md) | 第一人称回答系统边界、可靠性、AI 取舍、未来演进、中间件选择五部分。 |
+| 了解选择原因与代价 | [设计决策](docs/decisions.md) | 初始建议、最终决定、修改理由、收益、代价与实现状态。 |
+| 区分 AI 建议和用户决定 | [AI 使用说明](AI_USAGE.md) | 可追溯的方案、纠正、辅助实现与实际验证经历。 |
+| 核对代码是否满足设计 | [实现与证据核对表](docs/implementation-review.md) | 代码位置、实际行为、目标差异、风险及建议。 |
+| 查看要求覆盖 | [要求映射](docs/requirements-mapping.md) | 要求来源、对应文档、实现位置和证据状态。 |
+| 了解候选稿如何合并 | [参考资料与文档对齐](docs/reference-alignment.md) | 11 项对照、历史规则、候选章节映射与来源边界。 |
+| 维护和审查工程实现 | [工程规范](docs/standards.md) | Go、SQL、事务、日志、安全、并发、资源与验收约束。 |
+| 判断哪些检查实际运行过 | [Docker 验收记录](docs/verification.md) | 已归档通过验收的时间、命令、退出码、真实依赖场景及能力边界。 |
+
+首次阅读建议从本页进入完整设计，再按需要查看题目答复和决策记录。评审实现时，结合实现核对表与验收记录，分别判断代码存在、归档场景已测试和能力保证范围。机构限流、分组隔离、多实例全局配额、自动熔断和独立扩容属于后续演进，归档验收不构成这些能力的实现或性能证明。
 
 ## 已知限制
 

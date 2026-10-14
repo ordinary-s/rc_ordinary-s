@@ -1,52 +1,50 @@
 # HTTP 通知服务 MVP
 
-这是一个基于 Go、MySQL/InnoDB 和 Apache RocketMQ 的 HTTP 通知服务。HTTP API 将通知任务与 Outbox 事件写入同一个 MySQL 事务；Publisher 将小型事件投递到 RocketMQ；同一 Go 进程中的消费者按任务执行外部 HTTP。当前服务按单实例设计。
+业务系统在用户注册、订单支付等事件发生后，常常需要调用外部机构的 HTTP 接口。如果直接在业务请求中等待外部响应，下游的延迟和故障就会影响上游；每个业务系统还需要自行处理重试、重复通知和结果查询。
 
-完整设计、技术取舍和实现边界见下方[文档导航](#文档导航)。**已归档 Docker 验收 `20261014T063922Z-6c5cb01c` 为 PASS**；运行日期、命令、真实场景与保证范围见[验收记录](docs/verification.md)。该结果适用于记录中的运行环境与场景。
+本项目将这部分工作集中到一个异步通知服务中。调用方提交目标机构和请求内容，服务先保存任务，再完成后台投递，并提供状态查询与人工核对入口。技术栈为 **Go + MySQL/InnoDB + Apache RocketMQ + Transactional Outbox**，目前按单实例部署。
 
-## 边界与语义
-
-- RocketMQ 内部消息采用至少一次交付，重复消费由 task 状态和尝试记录去重。
-- 每个逻辑通知最多三次 HTTP 业务尝试，包含首次。可重试的 HTTP 429/5xx 采用两段退避；明确的非重试 4xx 结束为 FAILED。
-- 重试到期时间与 HTTP 尝试结果在同一 MySQL 事务持久化；MQ 重投或进程重启会遵守该时间。超出任务时效或本次有界处理预算的 `Retry-After` 会以 FAILED 结束，不提前发送，也不新建业务重试队列。
-- 超时或断连属于远端结果不明时，保守地写入 UNCERTAIN 并结束消费，避免盲目重复有副作用的请求。外部成功但结果无法保存时，重投恢复会把在途尝试标为待核对，不再发一次 HTTP。
-- HTTP 成功而结果暂时无法落库时，同一次消费内最多进行 3 次结果保存（初次 + 两次短等待后重试），不重新调用 HTTP；仍失败才返回 MQ 原生重投。重投发现 STARTED 会写成 UNCERTAIN。
-- FAILED、FAST_FAILED、EXPIRED、UNCERTAIN 在结果可靠保存后均是已完成的消费结果。快速失败由管理员设置，关闭后只影响后续任务，旧终态不会复活。
-- 因为允许有限重试后终止、快速失败和不明结果，本服务不承诺通知最终必达，也不承诺外部恰好一次。下游需按稳定 task ID 的 `Idempotency-Key` 实现去重，才能降低远端成功/本地未知时的副作用。
-- “最多三次”指应用层业务尝试；Go `net/http` Transport 对某些幂等请求可能进行内部网络重试，因此不声称底层网络发送绝不超过三次。
-
-## 架构
+## 系统架构
 
 ```text
-调用方 --HTTP/鉴权/幂等--> API --单个 MySQL 事务--> notification + outbox
-                                                    |
-                                       Outbox 定时扫描并确认发送
-                                                    v
-                                            RocketMQ Topic
-                                                    |
-                     结果可靠保存 <--- 单条消费 + 有界并发 ---+--- HTTP(S) 目标
+调用方 --HTTP/鉴权/幂等--> API --同一 MySQL 事务--> 通知任务 + Outbox
+                                                        |
+                                            Go 定时扫描并发布消息
+                                                        v
+                                                    RocketMQ
+                                                        |
+                               单条消费 + 有界并发 ------+
+                                         |
+                                         v
+                                    外部 HTTP 接口
+                                         |
+                                         v
+                                保存投递结果，完成消费
 ```
 
-细节见[设计说明](docs/design.md)。系统边界、可靠性和扩容分析见[题目逐项答复](docs/assignment-answers.md)，技术选型与代价见[设计决策](docs/decisions.md)。
+API、Outbox 发布器和消费者运行在同一个 Go 进程中。MySQL 保存任务、尝试记录和发布状态；RocketMQ 负责消息交付及执行异常的原生重试。完整流程、事务边界和状态转换见[设计说明](docs/design.md)。
 
-## 本机启动
+## 三个关键设计
 
-要求 Docker Desktop/Linux 容器支持和 Compose 插件。无需宿主机预装 Go、MySQL 或 RocketMQ。
+**1. 先可靠受理，再异步投递。** 通知任务和 Outbox 在同一个 MySQL 事务中提交，避免任务已经受理、消息却没有发出的双写问题。调用方使用幂等键重复提交时，同内容复用原任务，不同内容返回冲突。接口返回 `202` 表示任务已保存，外部机构的投递结果需要另外查询。
+
+**2. 将业务重试和执行异常分开。** 每个任务最多进行三次 HTTP 业务尝试，包含首次。429/5xx 可以在剩余时间内退避重试；次数耗尽后保存终止失败结果并完成消费。只有数据库故障、进程中断等导致执行未完成或结果未可靠保存的情况，才交给 RocketMQ 原生重试，重复消息不会重新获得三次机会。机构长期不可用时，管理员可以开启快速失败；命中开关的任务保存终态，关闭开关后旧任务不会自动补发。
+
+**3. 对结果不明的请求采取保守策略。** HTTP 成功后写库暂时失败，先重试保存结果，避免再次调用外部接口。若超时、断连或中断后的恢复无法确认远端是否执行，则记录 `UNCERTAIN` 并停止自动发送，交由人工核对。这降低了重复副作用的风险，代价是部分通知需要人工处理；服务不承诺最终必达或外部业务恰好一次。
+
+这些选择的替代方案和代价见[设计决策](docs/decisions.md)，系统边界与扩容分析见[题目逐项答复](docs/assignment-answers.md)。
+
+## 快速启动
+
+需要 Docker Engine 和 Compose 插件；Windows 可使用运行 Linux 容器的 Docker Desktop，无需另装 Go、MySQL 或 RocketMQ。启动 Docker 后，在项目根目录执行：
 
 ```powershell
-Set-Location 'D:\rc_notification'
+docker info
 if (-not (Test-Path -LiteralPath '.env')) { Copy-Item .env.example .env }
-# 按本机使用需要改掉仅供演示的示例凭证
 .\scripts\dev-up.ps1
 ```
 
-仅首次启动且尚无 `.env` 时复制示例，已有本地配置应保留。先用 `docker info` 检查引擎；本 Windows 机器若未启动，运行 `& 'C:\Users\admin\.codex\scripts\Start-DockerDesktop.ps1'`，等待引擎就绪后再运行上述脚本。已运行的引擎无需重启。
-
-演示应用绑定到 `127.0.0.1:8080`，MySQL 和 MQ 管理端口不映射到宿主机。配置由 `.env` 加 Compose 环境变量提供；真实凭证不要提交。
-
-管理员 token 对应单个 `ADMIN_ACTOR` 配置身份，MVP 不接受调用方通过自报 Header 选择审计人。默认消费处理预算为 90 秒，RocketMQ 消费超时为 2 分钟；启动配置会校验其覆盖三次 HTTP 超时、两段退避和结果落库余量。可用 `DELIVERY_BUDGET`、`MQ_CONSUME_TIMEOUT` 调整，但两者须保持预算小于消费超时。
-
-快速检查：
+首次使用时复制 `.env.example`，已有配置保持不变。示例凭证只用于本地演示，实际使用前应替换。默认应用地址为 `http://127.0.0.1:8080`，MySQL 和 MQ 管理端口不映射到宿主机。
 
 ```powershell
 docker compose -p rcnotif-dev ps
@@ -54,9 +52,11 @@ Invoke-RestMethod http://127.0.0.1:8080/healthz
 Invoke-RestMethod http://127.0.0.1:8080/readyz
 ```
 
-## API
+`/healthz` 检查进程存活，`/readyz` 检查 MySQL、MQ 客户端状态和 Broker TCP 连通性。默认配置及超时参数见 [.env.example](.env.example) 和[设计说明](docs/design.md)。
 
-客户端身份来自 Bearer 凭证映射的 `CLIENT_ID`，不接受请求体自报身份。示例仅适用于 `.env.example` 演示凭证。
+## API 与调用示例
+
+客户端身份由 Bearer 凭证映射到 `CLIENT_ID`，不接受请求体自报身份。以下示例使用 `.env.example` 的演示 token；修改配置后需替换为相应值。
 
 ```powershell
 $headers = @{
@@ -75,61 +75,60 @@ Invoke-RestMethod -Uri "http://127.0.0.1:8080/api/v1/notifications/$($task.task_
 
 | 接口 | 鉴权 | 说明 |
 |---|---|---|
-| `POST /api/v1/notifications` | 客户端 Bearer + `Idempotency-Key` | 同键同内容返回原 task；同键异内容 `409`；事务提交后 `202` |
-| `GET /api/v1/notifications/{id}` | 客户端 Bearer | 仅返回该客户端任务和尝试记录，不返回原请求头/正文 |
-| `GET /api/v1/notifications?status=FAILED&page=1&page_size=20` | 客户端 Bearer | 调用方隔离的分页查询，最大页大小 100 |
-| `PATCH /api/v1/admin/destinations/{id}/fast-fail` | 管理员 Bearer | 请求体 `{"enabled":true,"reason":"人工原因"}`；保存配置的管理员操作人、原因和时间 |
-| `POST /api/v1/admin/notifications/{id}/resolve` | 管理员 Bearer | 请求体 `{"conclusion":"人工核对结论"}`；记录配置的管理员操作人和结论，不重放任务 |
-| `GET /healthz` | 无 | 进程存活 |
-| `GET /readyz` | 无 | MySQL、RocketMQ 客户端和配置 Broker TCP 探测；MQ 不可用时返回 503，API 在进程仍运行且 MySQL 可用时仍可持久化受理 |
+| `POST /api/v1/notifications` | 客户端 Bearer + `Idempotency-Key` | 同键同内容返回原任务；同键异内容 `409`；事务提交后返回 `202` |
+| `GET /api/v1/notifications/{id}` | 客户端 Bearer | 查询当前客户端的任务与尝试记录，不返回原请求头或正文 |
+| `GET /api/v1/notifications?status=FAILED&page=1&page_size=20` | 客户端 Bearer | 按状态分页查询，最大页大小 100 |
+| `PATCH /api/v1/admin/destinations/{id}/fast-fail` | 管理员 Bearer | 请求体 `{"enabled":true,"reason":"人工原因"}`；记录配置身份、原因和时间 |
+| `POST /api/v1/admin/notifications/{id}/resolve` | 管理员 Bearer | 请求体 `{"conclusion":"人工核对结论"}`；记录结论，不改变投递状态或重放任务 |
+| `GET /healthz` | 无 | 检查进程存活 |
+| `GET /readyz` | 无 | 检查依赖可用性；MQ 不可用时返回 503 |
 
-演示目的地通过 migration seed 到 `http://mock-target:8090/notify`，只有配置的协议、主机、端口允许。MVP 没有目标管理平台、凭证轮换或任意 URL 转发。
+演示目的地由 migration 初始化为 `http://mock-target:8090/notify`。请求只能引用已配置的机构，受理时会检查目标协议、主机和端口。管理员审计身份来自 `ADMIN_ACTOR`，不接受客户端自报。
 
-## 完整 Docker 验收
+## 测试与验证
 
-Windows 一键入口：
+2026-10-14 的归档 Docker 验收通过，覆盖 Go 格式和静态检查、单元测试、race 测试，以及真实 MySQL、RocketMQ、应用和 mock target 的集成链路。重点场景包括三次 503 后终止、重复消息、快速失败、结果写库故障、Broker 中断恢复和 SIGTERM。具体环境、命令、结果与证据见[验收报告](docs/verification.md)。
+
+在项目根目录运行完整验收：
 
 ```powershell
-Set-Location 'D:\rc_notification'
 .\scripts\verify-docker.ps1
 ```
 
-WSL/Linux 等价入口（先确认 `/mnt/d` 真正映射 D 盘）：
+仓库也提供 Bash 入口：
 
 ```bash
-findmnt -T /mnt/d/rc_notification
-cd /mnt/d/rc_notification
 bash scripts/verify-docker.sh
 ```
 
-脚本检查 Docker/Compose、构建锁定版本的应用与 Go/race test-runner 镜像、启动隔离的 MySQL 8.4.8 + RocketMQ 5.5.0 + NameServer + mock target，等待真实依赖健康，运行 migration/Topic/Group 初始化、Broker 停启和 Docker 内完整测试。覆盖真实重试/DLQ、持久化 HTTP 重试时间、Outbox 标记失败、管理员处置错误、结果保存失败及 SIGTERM。指定已归档运行的 ID、退出码、源码归属及精简证据见[验收记录](docs/verification.md)，保留其原始时间和结果。
+已归档的通过记录使用 Windows PowerShell。使用 WSL 时，需先确认项目所在盘的挂载与 Docker 集成正常。脚本创建独立的 Compose project 和命名卷，报告输出到 `reports/<run_id>/`。
 
-## 人工异常闭环
+## 人工核对与死信排查
 
-按 `status=FAILED` 或 `status=UNCERTAIN` 查询任务 API，检查尝试和 `result_reason`。resolve 只允许 FAILED、FAST_FAILED、EXPIRED、UNCERTAIN，保存结论但不改状态、不重发。原生 DLQ 中仍为 PENDING/PROCESSING 或根本不存在的任务无法用此接口结案，当前须另存受控处置记录，详见[实现审查 R03](docs/implementation-review.md#r03dlq-消息不一定能通过现有-resolve-接口闭环)。原生死信 topic 为 `%DLQ%notification_delivery_workers`。RocketMQ 管理工具在 Broker 镜像内可查询：
+可按 `FAILED` 或 `UNCERTAIN` 查询任务，结合尝试记录和 `result_reason` 核对外部机构的实际结果。resolve 接口仅接受 FAILED、FAST_FAILED、EXPIRED、UNCERTAIN，保存结论后仍保留原投递状态。
+
+RocketMQ 执行异常重试耗尽后进入 `%DLQ%notification_delivery_workers`。如果对应任务仍处于 PENDING/PROCESSING，或任务记录不存在，现有 resolve 接口无法记录结论，需要另外保留人工处置记录，详见[人工处理的限制](docs/implementation-review.md#r03dlq-消息不一定能通过现有-resolve-接口闭环)。可在 Broker 容器中查询消费组和死信：
 
 ```bash
 docker compose -p rcnotif-dev exec broker /home/rocketmq/rocketmq-5.5.0/bin/mqadmin consumerStatus -n namesrv:9876 -g notification_delivery_workers
 docker compose -p rcnotif-dev exec broker /home/rocketmq/rocketmq-5.5.0/bin/mqadmin printMsg -n namesrv:9876 -t '%DLQ%notification_delivery_workers' -c UTF-8 -d false
 ```
 
-在锁定版本的 Broker 镜像中，`-c` 指定字符集，`-d false` 关闭正文打印。需要检查小事件中的 task/event ID 时，在受控终端按需开启正文，留存仅保留必要标识、时间和核对结论。MVP 不自动把 DLQ 同步成数据库待办，不自动重放死信或已终态任务。
+`-c` 指定字符集，`-d false` 关闭正文打印。需要查看事件中的 task/event ID 时，可在受控终端按需开启正文，仅保留必要标识和核对结论。当前没有自动死信重放功能。
 
 ## 文档导航
 
-| 阅读目的 | 文档 | 内容 |
-| --- | --- | --- |
-| 理解完整架构与故障处理 | [完整设计](docs/design.md) | 17 节覆盖边界、流程、事务、幂等、Outbox、消费、状态机、三次尝试、人工处理、安全与演进。 |
-| 按作业问题阅读设计判断 | [题目逐项答复](docs/assignment-answers.md) | 第一人称回答系统边界、可靠性、AI 取舍、未来演进、中间件选择五部分。 |
-| 了解选择原因与代价 | [设计决策](docs/decisions.md) | 初始建议、最终决定、修改理由、收益、代价与实现状态。 |
-| 区分 AI 建议和用户决定 | [AI 使用说明](AI_USAGE.md) | 可追溯的方案、纠正、辅助实现与实际验证经历。 |
-| 核对代码是否满足设计 | [实现与证据核对表](docs/implementation-review.md) | 代码位置、实际行为、目标差异、风险及建议。 |
-| 判断哪些检查实际运行过 | [Docker 验收记录](docs/verification.md) | 已归档通过验收的时间、命令、退出码、真实依赖场景及能力边界。 |
+| 文档 | 重点内容 |
+|---|---|
+| [完整设计](docs/design.md) | 处理流程、事务边界、幂等、状态机、HTTP 投递与资源控制 |
+| [题目逐项答复](docs/assignment-answers.md) | 系统边界、可靠性、AI 取舍、未来演进与中间件选择 |
+| [设计决策](docs/decisions.md) | 备选方案、选择理由、收益和代价 |
+| [AI 使用说明](AI_USAGE.md) | AI 参与范围、关键选择及具体实现案例 |
+| [验收报告](docs/verification.md) | 测试方法、实际结果和可查阅的原始报告 |
+| [已知限制与改进方向](docs/implementation-review.md) | 当前实现的边界、改进建议及源码依据 |
 
-首次阅读建议从本页进入完整设计，再按需要查看题目答复和决策记录。评审实现时，结合实现核对表与验收记录，分别判断代码存在、归档场景已测试和能力保证范围。机构限流、分组隔离、多实例全局配额、自动熔断和独立扩容属于后续演进，归档验收不构成这些能力的实现或性能证明。
+## 当前限制
 
-## 已知限制
+当前采用单应用、单 MySQL、单 Broker，尚未提供多实例执行协调、机构级 QPS 配额、自动熔断或高可用部署，也没有生产吞吐量的压测结论。共享消费者资源意味着慢机构可能影响其他机构，后续需要结合负载引入分组隔离。
 
-单实例、单 MySQL、单 Broker；没有全局机构 QPS 配额、自动熔断/半开、严格顺序、通用供应商响应映射、凭证刷新平台、自动 DLQ 重放或审批后台。宿主机意外断电/单 Broker 损坏不具备高可用保证。同步刷盘与命名卷只提升本机验收拓扑的持久性，不构成备份或跨故障域容灾。
-
-快速失败按消费者观察到的配置生效，配置更新与发出请求之间仍有竞态；已有在途请求不会撤销。执行时目标复核、DDL 中断恢复、部分日志关联和锁等待预算也有已记录边界，具体分析与改进建议见[实现审查](docs/implementation-review.md)。
+三次上限针对 HTTP 业务尝试，Go Transport 在部分连接故障下可能内部重试；快速失败开关也不会撤销已经在途的请求，配置读取与发送之间存在竞态。发送时目标复核、迁移中断恢复、异常日志与锁等待预算等问题详见[已知限制](docs/implementation-review.md)。

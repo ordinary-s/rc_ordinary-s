@@ -1,6 +1,6 @@
 # API 通知系统：完整设计与实现边界
 
-本文以源码基线 `9ed109dce1a7e3373e052d06c7d343c1ba63c652` 和本次用户确认的最终规则为依据。设计目标、当前实现、后续演进分别说明；偏差见[实现审查](implementation-review.md)，运行成绩以[验收记录](verification.md)为准。
+系统通过 MySQL 事务可靠受理通知，再由 RocketMQ 驱动异步 HTTP 投递。核心设计是将消息发布、HTTP 尝试和结果保存分开管理：允许消息重复，限制业务尝试次数，并在外部结果不明时停止自动发送。以下说明处理流程、故障恢复和当前能力边界；验证结果见[验收记录](verification.md)。
 
 ## 1. 业务背景与系统定位
 
@@ -32,7 +32,7 @@ MVP 将 API、Outbox 发布器和消费者放在一个 Go 进程。模块职责�
 | Apache RocketMQ | 分发、消费进度、执行异常原生重试/DLQ | 保留成熟队列恢复能力；需管理 NameServer、Broker、SDK 和路由兼容 |
 | Transactional Outbox | 发布责任与任务同事务提交，后台补发 | 解决数据库与 MQ 双写窗口；允许重复消息，增加扫描与状态更新成本 |
 
-版本与镜像 digest 以 [Dockerfile](../Dockerfile)、[Compose 配置](../compose.yaml) 和 [go.mod](../go.mod) 为准，归档运行环境见[验收记录](verification.md)。当前为 Go 1.27.2、MySQL 8.4.8、RocketMQ 5.5.0、`rocketmq-client-go/v2 v2.1.2`。这是 Remoting SDK，使用 NameServer/Broker，不混用另一套 gRPC SDK 或 Proxy API。RabbitMQ 仅保留在[历史决策](decisions.md)与[组件替代分析](assignment-answers.md)中。
+当前使用 Go 1.27.2、MySQL 8.4.8、RocketMQ 5.5.0 和 `rocketmq-client-go/v2 v2.1.2`。客户端采用 Remoting 协议，通过 NameServer 发现 Broker；当前部署不需要 gRPC Proxy。版本与镜像 digest 固定在 [Dockerfile](../Dockerfile)、[Compose 配置](../compose.yaml) 和 [go.mod](../go.mod)，运行环境见[验收记录](verification.md)。选型过程与替代方案见[设计决策](decisions.md)和[题目答复](assignment-answers.md)。
 
 ## 4. 完整处理流程
 
@@ -49,11 +49,16 @@ T1 本地事务：notification(PENDING, 次数0) + outbox(PENDING)
     v
 Go Publisher：扫描到期的 PENDING Outbox，每批最多100条
     |
-    +-- SendSync 未确认 / PUBLISHED 落库失败 --> 保留发布责任，退避补发
+    +-- SendSync --> RocketMQ（Broker 接收后即可分发）
     |
     +-- SendOK 且标记成功 --> PUBLISHED
-                 |
-                 v
+    |
+    +-- SendSync 未确认 / PUBLISHED 落库失败 --> 保留发布责任，退避补发
+```
+
+消费可以在本地标记 PUBLISHED 之前开始。Broker 已接收消息、但发送确认或本地标记尚未完成时，发布器仍可能补发，因此消费侧需要处理重复消息。
+
+```text
           RocketMQ 单条消费回调、有界并发
                  |
           单实例 task 锁 -> 读取任务/尝试记录
@@ -104,7 +109,7 @@ Go Publisher：扫描到期的 PENDING Outbox，每批最多100条
 
 Publisher 默认每秒扫描一次，按 `idx_outbox_pending_due` 获取 `publish_state='PENDING' AND next_attempt_at<=UTC_TIMESTAMP(6)`，最多 100 条，逐条发送。它不扫描 FAILED 任务，不为业务重试增加 Outbox。事件只带 `event_id/task_id/trace_id`，同一任务的 event_id 稳定且等于 task_id。
 
-发送超时可能意味着 Broker 已收到消息。本地 PUBLISHED 更新失败也可能在 Broker 接收之后发生。两种情况都保留发布责任，并尝试持久化 1、2、4…最高 60 秒的退避；若连退避更新也失败，下次扫描仍可能重发，不能承诺数据库完全不可写时仍维持逐条退避。消费者必须容忍重复事件。
+发送超时可能意味着 Broker 已收到消息。本地 PUBLISHED 更新失败也可能在 Broker 接收之后发生。两种情况都保留发布责任，并尝试持久化 1、2、4…最高 60 秒的退避；若连退避更新也失败，下次扫描仍可能重发。因此，逐条退避依赖数据库能够保存下次发布时间，消费者也必须容忍重复事件。
 
 Outbox 在依赖恢复且发布循环持续运行时补偿未完成发布，不保证灾难性丢库、永久停机或超过 Broker 保留策略后仍必达。当前没有 Outbox 归档任务和多实例发布领取协议。
 
@@ -112,7 +117,7 @@ Outbox 在依赖恢复且发布循环持续运行时补偿未完成发布，不�
 
 发布使用 SendSync，只有非空结果且 `Status==SendOK` 才尝试标记 PUBLISHED；Producer 的 SDK 额外发送重试设为 0，由 Outbox 统一承担应用发布补偿。发送 context 为 7 秒，SDK 发送 timeout 为 5 秒。
 
-消费者为 Clustering PushConsumer；`WithConsumeMessageBatchMaxSize(1)`、`WithPullBatchSize(1)`，消费 goroutine 默认 4，可配置 1–64。回调额外检查消息数为 1。没有整批成功后应用另发失败单条的第二路径。
+消费者为 Clustering PushConsumer；`WithConsumeMessageBatchMaxSize(1)`、`WithPullBatchSize(1)`，消费 goroutine 默认 4，可配置 1–64。回调额外检查消息数为 1。每条消息独立返回处理结果，执行异常统一交给 RocketMQ 原生重试，避免批次内部分成功的协调成本。
 
 | 处理结果 | Engine 返回 | SDK 回调 |
 |---|---|---|
@@ -121,9 +126,9 @@ Outbox 在依赖恢复且发布循环持续运行时补偿未完成发布，不�
 | MySQL 读写异常、未完成的上下文取消 | error | ConsumeRetryLater |
 | 消息损坏、缺少必要 ID、回调批量违约 | 在 MQ 边界返回 error | ConsumeRetryLater |
 
-“ACK/确认”是概念表述，实际使用上述 SDK 返回值。`MQ_MAX_RECONSUME` 默认 8，与 HTTP 三次无关；验收设为 2，并记录该 Broker/SDK 实际进入 DLQ 的重消费次数，不能按另一版本文档推算。原生 DLQ 为 `%DLQ%notification_delivery_workers`。
+这里的消费确认通过上述 SDK 返回值完成。`MQ_MAX_RECONSUME` 默认 8，与 HTTP 三次上限独立；验收配置设为 2，实际重消费次数与 DLQ 结果见[验收记录](verification.md)。这组结果适用于当前锁定的 Broker/SDK 组合。原生 DLQ 为 `%DLQ%notification_delivery_workers`。
 
-[RocketMQ 消费重试文档](https://rocketmq.apache.org/docs/featureBehavior/10consumerretrypolicy/)解释失败重投与耗尽后死信的职责，并指出不要用重试实现限流。具体配置使用锁定的 [Go v2.1.2 SDK](https://github.com/apache/rocketmq-client-go/blob/v2.1.2/consumer/option.go)，不直接套用不同客户端的示例。
+[RocketMQ 消费重试文档](https://rocketmq.apache.org/docs/featureBehavior/10consumerretrypolicy/)说明了异常重投与死信的职责。原生重试用于恢复未完成处理；流量控制需要单独的限流机制。项目的具体配置对应 [Go v2.1.2 SDK](https://github.com/apache/rocketmq-client-go/blob/v2.1.2/consumer/option.go)。
 
 ## 8. 每个任务最多三次 HTTP 业务尝试
 
@@ -150,7 +155,7 @@ Outbox 在依赖恢复且发布循环持续运行时补偿未完成发布，不�
 
 基础预算为 `3×10s+10s+20s=60s`。启动校验另加 950ms 与 5s 余量；数据库耗时仍受 context 约束，不保证任意故障下正常完成。处理预算在取得 task 锁之后开始，锁等待不计入。等待使用可取消 timer，SIGTERM 会取消执行。
 
-**三次是应用层 client.Do/持久化尝试机会。** Go Transport 对某些可重放、视作幂等的请求可能内部重试，本实现有稳定幂等头和可重放 Body，没有证明任意连接故障下实际请求绝不超过三次。若要求物理请求硬上限，这是待修正差异，不能仅靠措辞宣布满足。参见 [Go Transport 文档](https://pkg.go.dev/net/http#Transport)与[实现审查](implementation-review.md)。
+**三次上限针对应用层 `client.Do` 调用和持久化尝试计数。** 请求带有稳定幂等头和可重放 Body，Go Transport 在部分连接故障下可能内部重试。因此，当前实现不保证物理 HTTP 请求次数最多为三次；若业务要求这一硬上限，需要补充底层重放控制与故障测试。参见 [Go Transport 文档](https://pkg.go.dev/net/http#Transport)与[已知限制](implementation-review.md)。
 
 ## 9. 机构快速失败与终态规则
 
@@ -158,7 +163,7 @@ Outbox 在依赖恢复且发布循环持续运行时补偿未完成发布，不�
 
 每轮执行（包括退避后）读取机构配置。观察到 fast_fail_enabled=true，不启动下次 HTTP、不增加未发生的次数，保存 FAST_FAILED 后完成消费。单任务三次失败不会自动开启机构开关。配置按 destination 隔离，不改变其他机构开关；当前共享 Worker 仍可能产生资源干扰。
 
-关闭开关只允许后续尚未终态的任务执行，旧 FAILED/FAST_FAILED 不复活。打开开关不能撤销已发出的 HTTP。读开关与发出之间没有同一同步屏障，管理员修改与发送竞争时，仍可能有越过检查点的请求继续发出；“配置提交瞬间严格零新请求”未实现，见实现审查。
+关闭开关只允许后续尚未终态的任务执行，旧 FAILED/FAST_FAILED 不复活。打开开关不能撤销已发出的 HTTP。读开关与发出之间没有同一同步屏障，管理员修改与发送竞争时，仍可能有越过检查点的请求继续发出；“配置提交瞬间严格零新请求”未实现，见[已知限制](implementation-review.md)。
 
 快速失败期间没有业务探测流量，管理员需结合机构通知、既有监控或安全人工验证判断恢复。查看频率和负责人属于运维约定，代码没有自动探测、半开或自动恢复。
 
@@ -177,7 +182,7 @@ Outbox 在依赖恢复且发布循环持续运行时补偿未完成发布，不�
 | 失败及下次时间已提交，退避中断 | 无 STARTED 遗留时，用剩余次数并遵守原到期时间 |
 | 终态已落库、MQ 确认前中断 | 重投查终态直接完成，不发 HTTP |
 
-PROCESSING 不是成功，也不是永远跳过。代码区分已完成的尝试和仍为 STARTED 的尝试。即使下游声称支持去重，也不对遗留 STARTED 自动再发；候选的“安全时可再试”不是当前实现。
+PROCESSING 任务会根据尝试记录恢复：已完成的失败尝试可以在剩余预算内继续；遗留 STARTED 则表示无法确认上次调用是否执行，转为 UNKNOWN/UNCERTAIN 并停止自动发送。这一保守策略同样适用于支持幂等键的下游，代价是部分原本可以安全重试的任务仍需人工核对。
 
 ## 11. 数据表与状态设计
 
@@ -189,7 +194,7 @@ PROCESSING 不是成功，也不是永远跳过。代码区分已完成的尝试
 | outbox | event_id/task_id 各自唯一；publish_state、publish_attempts、next_attempt_at、last_error | 首次事件发布责任 |
 | schema_migrations | version 主键、applied_at | 迁移登记，不能让 DDL 自动获得事务回滚能力 |
 
-notification.next_attempt_at 是 HTTP 等待；outbox.next_attempt_at 是发布补偿等待，不得混用。Body 只保存一份，MQ 事件和查询响应不带原始正文/Header。
+notification.next_attempt_at 记录下次 HTTP 尝试时间，outbox.next_attempt_at 记录下次消息发布时间，两者分别管理投递和发布的退避。Body 只保存一份，MQ 事件和查询响应不带原始正文/Header。
 
 | 当前状态 | 条件 | 下一状态/行为 |
 |---|---|---|
@@ -203,7 +208,7 @@ notification.next_attempt_at 是 HTTP 等待；outbox.next_attempt_at 是发布�
 | 任意终态 | 重复消息或关闭开关 | 保持终态，零新业务尝试 |
 | FAILED/FAST_FAILED/EXPIRED/UNCERTAIN | 人工 resolve | 只更新 resolution/resolved_by/resolved_at，不改状态 |
 
-没有 NEEDS_REVIEW、CLOSED 或“待恢复”枚举；候选的待核对对应 UNCERTAIN，结论是自由文本，不是 CONFIRMED_SUCCESS/ABANDONED 枚举。
+UNCERTAIN 表示投递结果不明。人工核对结论以自由文本保存在独立处置字段中，不改变任务的投递状态，也不会使任务重新获得发送机会。
 
 表为 InnoDB，表列小写 snake_case，明确 utf8mb4/排序规则；task_id、event_id、trace_id 等 ASCII 字段用 ascii_bin，client_id、destination_id、幂等键用 utf8mb4_0900_bin。时间是 UTC DATETIME(6)，写 UTC_TIMESTAMP(6)，Go DSN 用 parseTime/UTC。SQL 参数化、短事务，列表有客户端/状态/时间索引。
 
@@ -227,7 +232,7 @@ notification.next_attempt_at 是 HTTP 等待；outbox.next_attempt_at 是发布�
 
 接口、鉴权和示例见 [README](../README.md)。详情与列表只允许已鉴权调用方查询自己的任务；列表默认 20、有效 page_size 最大 100，详情带尝试记录，不返回原 Header/Body。管理员有机构开关和 resolve，没有重放接口。
 
-人工流程：检查失败/UNCERTAIN 或原生 DLQ → 按 task_id 查任务和尝试 → 向机构核实 → 记录事实、结论、操作人。对 FAILED、FAST_FAILED、EXPIRED、UNCERTAIN，可 resolve 保存结论；重复处置更新字段，没有不可变历史流水。结论不能伪装成收到过 2xx，也不新增 HTTP 预算。
+人工流程：检查失败/UNCERTAIN 或原生 DLQ → 按 task_id 查任务和尝试 → 向机构核实 → 记录事实、结论、操作人。对 FAILED、FAST_FAILED、EXPIRED、UNCERTAIN，可 resolve 保存结论；重复处置更新字段，没有不可变历史流水。人工结论与实际 HTTP 结果分别保留，不将任务改为 DELIVERED，也不新增 HTTP 预算。
 
 DLQ 是消费执行异常耗尽，任务可能仍为 PENDING/PROCESSING；普通三次 HTTP 失败已保存终态并完成消费。**PENDING/PROCESSING 的 DLQ 任务无法使用 resolve 结案（409）**，只能在受控外部记录中保存核对结果，这是现有人工闭环缺口。没有自动 DLQ 工单、强制终态或自动重放。
 
@@ -239,15 +244,15 @@ DLQ 是消费执行异常耗尽，任务可能仍为 PENDING/PROCESSING；普通
 
 当前 trace 表示入口关联标识，不为每次重消费另建 trace，也不保证供应商内部链路可见。task_id 是任务主标识；http_attempts 区分已用业务机会，mq_reconsume 区分原生异常重消费。
 
-主要日志为受理、消费结束/未完成、Outbox 异常、管理员操作。结果字段为 `trace_id/task_id/destination_id/http_attempts/mq_reconsume/result/code/cost_ms`，http_attempts 对应需求中的 attempt。审计补充 actor/enabled，发布异常补充 event_id/退避时间；不输出完整 Header、Body、Authorization、Cookie、带 Token 的 URL 或外部响应。
+主要日志包括受理、消费结束或未完成、Outbox 异常和管理员操作。结果字段为 `trace_id/task_id/destination_id/http_attempts/mq_reconsume/result/code/cost_ms`，其中 http_attempts 表示已用的业务尝试次数。审计补充 actor/enabled，发布异常补充 event_id/退避时间；不输出完整 Header、Body、Authorization、Cookie、带 Token 的 URL 或外部响应。
 
 共享 slog logger 只接收每次调用的局部字段，不将当前 task/trace 写入共享可变 logger。详细尝试放 DB，不逐层重复 INFO；Outbox 扫描错误每 30 秒最多记一次。没有独立日志队列/服务或全量 Trace 平台，Compose 输出有轮转限制。
 
-部分查询/Outbox 异常日志仍缺 trace，启动、迁移、SDK 路径尚未全面验证脱敏；有限 canary 扫描不证明所有故障路径安全。位置与建议见[实现审查](implementation-review.md)。
+部分查询/Outbox 异常日志仍缺 trace，启动、迁移、SDK 路径尚未全面验证脱敏；有限 canary 扫描不证明所有故障路径安全。位置与建议见[已知限制](implementation-review.md)。
 
 ## 15. 安全、并发与资源控制
 
-目标由 migration seed 配置，入口按 ALLOWED_TARGET 校验协议、主机、端口；调用方不能提供任意 URL。禁自动重定向和环境代理，保留 TLS 校验。但执行时重读 destination，尚未重复校验 allowlist，也无 DNS 解析地址范围检查，不能宣称完整 SSRF 防护。管理员/DB 配置变更是受信任边界。
+目标由 migration seed 配置，入口按 ALLOWED_TARGET 校验协议、主机、端口；调用方不能提供任意 URL。禁自动重定向和环境代理，保留 TLS 校验。当前防护依赖受信任的目标配置：执行时重读 destination，却没有重新校验 allowlist，也没有检查 DNS 解析后的地址范围。因此，受理后目标被修改和 DNS 地址变化仍是 SSRF 防护缺口。
 
 Body 最大 256 KiB，业务 Header 最多 64 个、合计 16 KiB；JSON 信封另有传输读取限制，接近上限且大量转义的文本未必能受理。管理员输入有大小限制；API 不返回原请求。运行 DB 用户为 DML 权限，迁移用独立初始化身份。没有应用层加密、凭证轮换平台或数据自动清理。
 
@@ -267,7 +272,7 @@ healthz 表示进程存活，readyz 在 2s context 内检查 MySQL、MQ 客户�
 
 人工快速失败可在指标成熟后演进为错误率阈值、开启时长和受控半开探测，先定义样本、429 与真实故障的区别和恢复判据。自动化不能默默把 FAST_FAILED 改成等待恢复或复活旧任务。
 
-API、Publisher、Consumer 的瓶颈不同，再分别拆部署扩容。多消费者之前先解决跨实例执行权和机构合计额度，可先固定归属/静态分配，确需动态协调再评估共享设施。本地 100 QPS 乘实例数不能声称仍满足机构全局 100 QPS；这是示例，不是压测成绩。
+API、Publisher、Consumer 出现不同瓶颈后，再分别拆部署扩容。增加实例前需解决跨实例执行权和机构合计额度，可先固定归属或静态分配，确需动态协调再评估共享设施。例如某机构总配额为 100 QPS，多个实例必须共享这 100 QPS，不能各自使用完整额度。
 
 | 应观察的指标（后续建设） | 支持的判断 |
 |---|---|
@@ -281,19 +286,19 @@ API、Publisher、Consumer 的瓶颈不同，再分别拆部署扩容。多消�
 
 ## 17. 验收场景与已知限制
 
-入口为 scripts/verify-docker.ps1；用 Dockerfile 锁定 Go 镜像做 gofmt 差异检查、vet、普通测试、race、integration 编译和真实 E2E。依赖包括 MySQL、NameServer、Broker、应用和可计数 mock target；启动成功不足以证明业务通过。
+验收脚本 [verify-docker.ps1](../scripts/verify-docker.ps1) 在 Dockerfile 锁定的 Go 镜像中执行格式检查、vet、普通测试、race 和集成测试。集成环境包括 MySQL、NameServer、Broker、应用和可计数 mock target，通过任务状态、尝试记录和实际请求次数验证业务行为。
 
-| 场景 | 必须有的观察 |
+| 场景 | 验证重点 |
 |---|---|
 | 并发幂等、异内容、大小写不同键 | task/Outbox 行数、409、原 task 复用 |
 | 503 后成功、连续三次 503、重复终态消息 | 尝试、mock 次数、终态；观察窗口内不再发 |
 | 快速失败开启/关闭后的新旧任务 | 开启零调用，新任务恢复，旧终态保持 |
-| 外部成功但结果保存失败 | 只重试保存；耗尽后真 MQ 重投，HTTP 不重复 |
+| 外部成功但结果保存失败 | 只重试保存；耗尽后通过 RocketMQ 重投，HTTP 不重复 |
 | 等待中断 | 到期时间跨处理保留，未到期不开始下次 |
-| DB 异常/原生 DLQ | 真 Broker 重消费和死信；普通 FAILED 不混入 |
+| DB 异常/原生 DLQ | Broker 重消费和死信；普通 FAILED 完成消费 |
 | Broker 中断/恢复、发布标记失败 | 持久 Outbox 补发，重复事件不增加 HTTP |
 | SIGTERM、原始文本、日志/canary | 可取消、不提前确认、恢复 UNCERTAIN、task/trace 配对 |
 
-运行 ID、命令、退出码、证据和未覆盖项统一见[验收文档](verification.md)，不以设计表替代成绩。
+各场景的运行记录、命令、退出码和覆盖范围见[验收文档](verification.md)。
 
-当前是单应用、单 MySQL、单 Broker，SYNC_FLUSH 和命名卷不构成 HA 或备份。没有生产性能、安全全路径、任意网络故障物理三次上限、开关严格切换屏障、多实例或 DDL 中断恢复证明。DLQ 中间态闭环、发送时目标复核和日志覆盖仍需修正。本次仅改文档，不将差异写成已实现。
+当前部署为单应用、单 MySQL、单 Broker，SYNC_FLUSH 和命名卷不能替代高可用与备份。现有验证覆盖功能与指定故障场景，尚未覆盖生产容量、完整安全路径、多实例协作和 DDL 中断恢复。物理 HTTP 次数硬上限、快速失败严格切换、DLQ 中间态处置、发送时目标复核及异常日志覆盖仍需完善，具体影响见[已知限制](implementation-review.md)。

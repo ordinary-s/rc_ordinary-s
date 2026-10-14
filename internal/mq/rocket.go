@@ -56,7 +56,7 @@ func New(cfg config.Config, logger *slog.Logger) (*Client, error) {
 		consumer.WithPullBatchSize(1),
 		consumer.WithConsumeGoroutineNums(cfg.ConsumerConcurrency),
 		consumer.WithMaxReconsumeTimes(cfg.MaxReconsume),
-		consumer.WithConsumeTimeout(2*time.Minute),
+		consumer.WithConsumeTimeout(cfg.MQConsumeTimeout),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create RocketMQ consumer: %w", err)

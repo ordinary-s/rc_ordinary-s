@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/ordinary-s/rc_ordinary-s/internal/mq"
@@ -22,10 +23,12 @@ type Sender interface {
 }
 
 type Publisher struct {
-	store  Store
-	sender Sender
-	logger *slog.Logger
-	poll   time.Duration
+	store            Store
+	sender           Sender
+	logger           *slog.Logger
+	poll             time.Duration
+	mu               sync.Mutex
+	lastScanErrorLog time.Time
 }
 
 func New(s Store, sender Sender, logger *slog.Logger, poll time.Duration) *Publisher {
@@ -49,7 +52,7 @@ func (p *Publisher) publishBatch(ctx context.Context) {
 	events, err := p.store.PendingOutbox(ctx, 100)
 	if err != nil {
 		if ctx.Err() == nil {
-			p.logger.Error("outbox scan failed", "code", "OUTBOX_SCAN_FAILED", "error_type", fmt.Sprintf("%T", err))
+			p.logScanError(err)
 		}
 		return
 	}
@@ -71,9 +74,23 @@ func (p *Publisher) publishBatch(ctx context.Context) {
 			continue
 		}
 		if err := p.store.MarkOutboxPublished(ctx, event.EventID); err != nil && ctx.Err() == nil {
-			p.logger.Error("outbox acknowledgement update failed", "event_id", event.EventID, "task_id", event.TaskID, "trace_id", event.TraceID, "code", "OUTBOX_MARK_FAILED", "error_type", fmt.Sprintf("%T", err))
+			delay := retryDelay(event.PublishAttempts)
+			if deferErr := p.store.DeferOutbox(ctx, event.EventID, "OUTBOX_MARK_FAILED", delay); deferErr != nil && ctx.Err() == nil {
+				p.logger.Error("outbox retry schedule failed", "event_id", event.EventID, "task_id", event.TaskID, "code", "OUTBOX_DEFER_FAILED", "error_type", fmt.Sprintf("%T", deferErr))
+			}
+			p.logger.Error("outbox acknowledgement update failed", "event_id", event.EventID, "task_id", event.TaskID, "trace_id", event.TraceID, "code", "OUTBOX_MARK_FAILED", "retry_in_ms", delay.Milliseconds(), "error_type", fmt.Sprintf("%T", err))
 		}
 	}
+}
+
+func (p *Publisher) logScanError(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if time.Since(p.lastScanErrorLog) < 30*time.Second {
+		return
+	}
+	p.lastScanErrorLog = time.Now()
+	p.logger.Error("outbox scan failed", "code", "OUTBOX_SCAN_FAILED", "error_type", fmt.Sprintf("%T", err))
 }
 
 func retryDelay(attempts int) time.Duration {

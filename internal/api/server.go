@@ -231,8 +231,13 @@ func (s *Server) resolveNotification(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "notification not found")
 		return
 	}
-	if err != nil {
+	if errors.Is(err, store.ErrNotEligible) {
 		writeError(w, http.StatusConflict, "notification is not eligible for manual resolution")
+		return
+	}
+	if err != nil {
+		s.logger.Error("notification resolution failed", "task_id", r.PathValue("id"), "code", "RESOLUTION_FAILED", "error_type", fmt.Sprintf("%T", err))
+		writeError(w, http.StatusInternalServerError, "resolution failed")
 		return
 	}
 	s.logger.Info("notification manually resolved", "task_id", n.ID, "trace_id", n.TraceID, "actor", actor, "result", "RESOLVED")
@@ -252,11 +257,7 @@ func (s *Server) authenticateAdmin(r *http.Request) (string, bool) {
 	if len(token) != len(s.cfg.AdminToken) || subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.AdminToken)) != 1 {
 		return "", false
 	}
-	actor := r.Header.Get("X-Admin-Actor")
-	if !validToken(actor, 64) {
-		return "", false
-	}
-	return actor, true
+	return s.cfg.AdminActor, true
 }
 
 func bearer(r *http.Request) string {

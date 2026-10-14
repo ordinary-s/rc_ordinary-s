@@ -36,9 +36,20 @@ type Notification struct {
 	HTTPStatus     int             `json:"http_status,omitempty"`
 	CreatedAt      time.Time       `json:"created_at"`
 	ExpiresAt      time.Time       `json:"expires_at"`
+	NextAttemptAt  *time.Time      `json:"-"`
 	ResolvedBy     string          `json:"resolved_by,omitempty"`
 	Resolution     string          `json:"resolution,omitempty"`
 	ResolvedAt     *time.Time      `json:"resolved_at,omitempty"`
+}
+
+// IsTerminal reports whether a notification must not be delivered again.
+func IsTerminal(status string) bool {
+	switch status {
+	case StatusDelivered, StatusFailed, StatusFastFailed, StatusExpired, StatusUncertain:
+		return true
+	default:
+		return false
+	}
 }
 
 type Attempt struct {

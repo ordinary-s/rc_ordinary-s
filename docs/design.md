@@ -51,7 +51,9 @@ HTTP 已成功但结果事务暂时失败时，`completeAttempt` 在同一次消
 ## HTTP 处理策略
 
 - 业务最大尝试数固定为 3：首次 + 两次重试。默认两段 10s/20s 指数等待并加有界抖动；Docker 验收使用更短的配置，但走相同状态转换。
-- 429/5xx 可重试；永久 4xx 立即 FAILED。有效 `Retry-After` 不被提前绕过；若等待会超过剩余时效，保存终止失败。
+- 429/5xx 可重试；永久 4xx 立即 FAILED。完成的尝试与 `notification.next_attempt_at` 在同一事务提交，消息重投或重启后仍等待持久化到期时间；开始下一次尝试时清空到期字段。
+- 有效 `Retry-After` 不被提前绕过；若等待时间加上剩余尝试预算超过任务时效或本次处理预算，保存 `FAILED` 并确认消息，不创建第二个业务排队机制。
+- 默认单次消费处理预算为 90 秒，RocketMQ SDK 消费超时为 2 分钟；配置启动校验要求三次 HTTP 上限、两段退避、结果落库等待和余量可在两者内完成。
 - DNS、连接断开、HTTP timeout 等可能无法判断远端是否执行，保守保存 UNCERTAIN，不进行重复有害请求。
 - 目标是初始化时固定的 HTTP(S) 主机/端口/协议白名单；关闭自动重定向，TLS 校验默认开启，不使用环境代理绕过目标限制。
 - 请求体要求 UTF-8 原始文本，当前最大 256 KiB；请求头最多 64 个且总计 16 KiB。不支持 multipart/大文件。
@@ -65,7 +67,21 @@ HTTP 已成功但结果事务暂时失败时，`completeAttempt` 在同一次消
 | `delivery_attempt` | `(task_id, attempt_no)` 主键、STARTED/结果/UTC 时间 | 每次实际启动的业务 HTTP 尝试 |
 | `outbox` | event/task 唯一键、publish 状态、下次发送时间/次数 | `idx_outbox_pending_due` 扫描待发事件 |
 
-全部是 InnoDB；utf8mb4 和明确 collation；ID/幂等键按大小写敏感约定比较；Body 原文只保存在 notification 一份；时间使用 UTC `DATETIME(6)` 与 `UTC_TIMESTAMP(6)`。目标以 migration seed，运行时使用限权用户，迁移另用 root/init 用户。迁移 DDL 会隐式提交，失败恢复靠可重跑的 `IF NOT EXISTS` 和 schema migration 版本表，不宣称全量原子回滚。
+全部是 InnoDB；utf8mb4 和明确 collation；ID/幂等键按大小写敏感约定比较；Body 原文只保存在 notification 一份；时间使用 UTC `DATETIME(6)` 与 `UTC_TIMESTAMP(6)`。目标以 migration seed，运行时使用限权用户，迁移另用 root/init 用户。MySQL DDL 会隐式提交，migration 版本行不能让 DDL 变成原子事务。[MySQL 8.4 文档](https://dev.mysql.com/doc/refman/8.4/en/implicit-commit.html)说明了隐式提交行为。`001_initial.sql` 的建表语句可重复执行；`002_notification_retry_due.sql` 只有一条 `ALTER TABLE`。若该列已添加但版本记录失败，运维先检查并核对：
+
+```sql
+SELECT COUNT(*) FROM information_schema.columns
+WHERE table_schema = DATABASE() AND table_name = 'notification' AND column_name = 'next_attempt_at';
+```
+
+列存在时，在确认版本尚未记录后补记 `002_notification_retry_due`；列不存在时再重跑迁移：
+
+```sql
+INSERT INTO schema_migrations (version, applied_at)
+VALUES ('002_notification_retry_due', UTC_TIMESTAMP(6));
+```
+
+此恢复步骤是人工核对，不把所有 DDL 说成可事务回滚或自动重跑。
 
 ## 管理和运行边界
 

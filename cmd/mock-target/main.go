@@ -24,6 +24,7 @@ type target struct {
 	mu           sync.Mutex
 	statuses     []int
 	delay        time.Duration
+	retryAfter   string
 	responseBody string
 	count        int
 	inFlight     int
@@ -47,6 +48,7 @@ func (t *target) configure(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Statuses     []int  `json:"statuses"`
 		DelayMS      int    `json:"delay_ms"`
+		RetryAfter   string `json:"retry_after"`
 		ResponseBody string `json:"response_body"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16*1024)).Decode(&input); err != nil {
@@ -56,7 +58,7 @@ func (t *target) configure(w http.ResponseWriter, r *http.Request) {
 	if len(input.Statuses) == 0 {
 		input.Statuses = []int{200}
 	}
-	if len(input.Statuses) > 20 || input.DelayMS < 0 || input.DelayMS > 10000 {
+	if len(input.Statuses) > 20 || input.DelayMS < 0 || input.DelayMS > 10000 || len(input.RetryAfter) > 64 {
 		http.Error(w, "configuration is out of bounds", http.StatusBadRequest)
 		return
 	}
@@ -69,6 +71,7 @@ func (t *target) configure(w http.ResponseWriter, r *http.Request) {
 	t.mu.Lock()
 	t.statuses = append([]int(nil), input.Statuses...)
 	t.delay = time.Duration(input.DelayMS) * time.Millisecond
+	t.retryAfter = strings.TrimSpace(input.RetryAfter)
 	t.responseBody = input.ResponseBody
 	t.count = 0
 	t.inFlight = 0
@@ -82,6 +85,7 @@ func (t *target) reset(w http.ResponseWriter, _ *http.Request) {
 	t.mu.Lock()
 	t.statuses = []int{200}
 	t.delay = 0
+	t.retryAfter = ""
 	t.responseBody = "ok"
 	t.count = 0
 	t.inFlight = 0
@@ -123,6 +127,7 @@ func (t *target) notify(w http.ResponseWriter, r *http.Request) {
 		status = t.statuses[position]
 	}
 	delay := t.delay
+	retryAfter := t.retryAfter
 	responseBody := t.responseBody
 	t.inFlight++
 	if t.inFlight > t.maxInFlight {
@@ -146,6 +151,9 @@ func (t *target) notify(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-timer.C:
 		}
+	}
+	if retryAfter != "" {
+		w.Header().Set("Retry-After", retryAfter)
 	}
 	w.WriteHeader(status)
 	_, _ = io.WriteString(w, strings.TrimSpace(responseBody))

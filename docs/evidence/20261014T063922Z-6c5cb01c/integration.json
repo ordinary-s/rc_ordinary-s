@@ -1,0 +1,215 @@
+{
+  "scenarios": [
+    {
+      "details": {
+        "after_duplicate": 1,
+        "mock_calls": 1,
+        "notifications": 1,
+        "outbox_state": "PUBLISHED",
+        "outboxes": 1,
+        "task_id": "c189b864-7b56-4dec-9c75-e7594e20b07b"
+      },
+      "name": "acceptance_transaction_and_idempotency",
+      "passed": true
+    },
+    {
+      "details": {
+        "due_at": "2026-10-14T06:42:52.072911Z",
+        "http_attempts": 2,
+        "mock_calls": 2,
+        "result": "DELIVERED",
+        "task_id": "05320472-acfc-451e-a331-33810b41a2f1"
+      },
+      "name": "persisted_retry_due_survives_context_cancellation",
+      "passed": true
+    },
+    {
+      "details": {
+        "audit_actor": "integration-test",
+        "first_http_status": 500,
+        "recovered_http_status": 200,
+        "task_id": "b67a65c2-0f04-46a5-b3ac-8ceace552f55"
+      },
+      "name": "resolution_database_failure_maps_to_500_then_recovers",
+      "passed": true
+    },
+    {
+      "details": {
+        "http_attempts": 1,
+        "local_mark_failures": 2,
+        "mark_retry_interval_ms": 1110,
+        "mock_calls_after_duplicate_window": 1,
+        "outbox_state_after_recovery": "PUBLISHED",
+        "task_id": "b5fbfa62-887f-4d98-9475-0658ca1a7388"
+      },
+      "name": "outbox_send_mark_failure_duplicate_safe",
+      "passed": true
+    },
+    {
+      "details": {
+        "case_distinct": true,
+        "concurrent_task_id": "31b2c0db-3349-4184-8507-87381ff0bdfc",
+        "notification_rows": 1,
+        "outbox_rows": 1
+      },
+      "name": "case_sensitive_and_parallel_idempotency",
+      "passed": true
+    },
+    {
+      "details": {
+        "configured_consumer_concurrency": 4,
+        "max_in_flight": 4,
+        "mock_calls": 8,
+        "tasks": [
+          {
+            "task_id": "e1df88e3-e572-4118-997c-c577ede29a36",
+            "trace_id": "2b230fd3-df0c-4a0a-bdfc-261b1a570590"
+          },
+          {
+            "task_id": "601c6c24-89c3-4ef7-b49d-9335a77dc9b5",
+            "trace_id": "b0cec16d-1c5c-4af4-9198-78b3862c12a7"
+          },
+          {
+            "task_id": "60d25bd9-d206-4c44-9e82-fba7d572d25e",
+            "trace_id": "f36d05e2-1061-4ca3-9f7c-09b7d98a4d81"
+          },
+          {
+            "task_id": "a65d1e16-3f5a-4b01-80b3-f859f344167f",
+            "trace_id": "06c5e6d8-c27b-420d-b8b7-68ef39382849"
+          },
+          {
+            "task_id": "2f3c6336-4ee8-4b6a-987a-571a4fd8e910",
+            "trace_id": "38de089c-436e-4b63-b84c-29635e7d0f83"
+          },
+          {
+            "task_id": "21cdf75d-42a2-4d85-9e9d-f4c7306a0f05",
+            "trace_id": "b360e1ef-da0f-47ca-93ee-8bd89916e07a"
+          },
+          {
+            "task_id": "443dce3d-1ce2-411a-8a02-4b53a446d0e0",
+            "trace_id": "6da2e3f9-03a2-4c7a-a302-45e51868e2c8"
+          },
+          {
+            "task_id": "2d442d5d-00e1-4857-ad90-069b84b90cc1",
+            "trace_id": "a5b4d227-6388-48e4-8857-f4ff892ffcc7"
+          }
+        ]
+      },
+      "name": "concurrent_tasks_keep_trace_and_task_context_paired",
+      "passed": true
+    },
+    {
+      "details": {
+        "attempts": 2,
+        "elapsed_ms": 381,
+        "mock_calls": 2,
+        "task_id": "0d7b9af9-ebc0-466f-bd9c-818675e2b585"
+      },
+      "name": "http_503_then_success",
+      "passed": true
+    },
+    {
+      "details": {
+        "after_duplicate": 3,
+        "attempts": 3,
+        "elapsed_ms": 536,
+        "mock_calls": 3,
+        "task_id": "d31d8288-b566-4982-96cf-8147a5c13b3c"
+      },
+      "name": "three_503_terminal_duplicate_delivery",
+      "passed": true
+    },
+    {
+      "details": {
+        "new_task": "f79deea6-7ffa-4ff9-91d8-eb3f8f1fddb4",
+        "old_calls_after_recovery": 0,
+        "old_task": "0b2d03cc-58ab-4810-a7ee-d2da15b0f8c1"
+      },
+      "name": "fast_fail_terminal_manual_recovery",
+      "passed": true
+    },
+    {
+      "details": {
+        "content_type": "application/xml; charset=utf-8",
+        "task_id": "10b49984-075f-4fe3-91dc-0957c4d93a03"
+      },
+      "name": "raw_body_0",
+      "passed": true
+    },
+    {
+      "details": {
+        "content_type": "application/x-www-form-urlencoded",
+        "task_id": "461c6118-91aa-40cd-88d9-48d82f93c97c"
+      },
+      "name": "raw_body_1",
+      "passed": true
+    },
+    {
+      "details": {
+        "plan": {
+          "Extra": "Using index condition",
+          "filtered": 100,
+          "id": 1,
+          "key": "idx_outbox_pending_due",
+          "key_len": "26",
+          "partitions": null,
+          "possible_keys": "idx_outbox_pending_due",
+          "ref": null,
+          "rows": 1,
+          "select_type": "SIMPLE",
+          "table": "outbox",
+          "type": "range"
+        },
+        "runner_timezone": "+00:00"
+      },
+      "name": "outbox_explain_utc",
+      "passed": true
+    },
+    {
+      "details": {
+        "http_attempts": 1,
+        "mock_calls": 1,
+        "mq_reconsume": 1,
+        "outbox_state": "PUBLISHED",
+        "task_id": "78d39c4c-6a37-42a5-b554-57585ca28fe9"
+      },
+      "name": "database_exception_native_redelivery",
+      "passed": true
+    },
+    {
+      "details": {
+        "attempt_state": "SUCCEEDED",
+        "elapsed_ms": 337,
+        "http_attempts": 1,
+        "mock_calls": 1,
+        "result": "DELIVERED",
+        "result_write_attempts": 3,
+        "task_id": "42477d9a-8fb6-4a87-be82-5683a92d548d"
+      },
+      "name": "external_success_result_write_retried_without_repeating_http",
+      "passed": true
+    },
+    {
+      "details": {
+        "attempt_state": "UNKNOWN",
+        "http_attempts": 1,
+        "mock_calls_after_duplicate_window": 1,
+        "mq_reconsume": 1,
+        "result": "UNCERTAIN",
+        "result_write_attempts": 3,
+        "task_id": "4814f199-5fd1-4cad-bb69-b5ba769c4ed8"
+      },
+      "name": "external_success_result_write_exhaustion_no_http_repeat",
+      "passed": true
+    },
+    {
+      "details": {
+        "msg_id": "AC180007420000000000446406b00003",
+        "reconsume_times": 3,
+        "topic": "%DLQ%notification_delivery_workers"
+      },
+      "name": "rocketmq_native_retries_reach_dlq",
+      "passed": true
+    }
+  ]
+}

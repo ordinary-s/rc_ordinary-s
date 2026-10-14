@@ -6,6 +6,7 @@
 
 - RocketMQ 内部消息采用至少一次交付，重复消费由 task 状态和尝试记录去重。
 - 每个逻辑通知最多三次 HTTP 业务尝试，包含首次。可重试的 HTTP 429/5xx 采用两段退避；明确的非重试 4xx 结束为 FAILED。
+- 重试到期时间与 HTTP 尝试结果在同一 MySQL 事务持久化；MQ 重投或进程重启会遵守该时间。超出任务时效或本次有界处理预算的 `Retry-After` 会以 FAILED 结束，不提前发送，也不新建业务重试队列。
 - 超时或断连属于远端结果不明时，保守地写入 UNCERTAIN 并结束消费，避免盲目重复有副作用的请求。外部成功但结果无法保存时，重投恢复会把在途尝试标为待核对，不再发一次 HTTP。
 - HTTP 成功而结果暂时无法落库时，同一次消费内最多进行 3 次结果保存（初次 + 两次短等待后重试），不重新调用 HTTP；仍失败才返回 MQ 原生重投。重投发现 STARTED 会写成 UNCERTAIN。
 - FAILED、FAST_FAILED、EXPIRED、UNCERTAIN 在结果可靠保存后均是已完成的消费结果。快速失败由管理员设置，关闭后只影响后续任务，旧终态不会复活。
@@ -39,6 +40,8 @@ Copy-Item .env.example .env
 
 演示应用绑定到 `127.0.0.1:8080`，MySQL 和 MQ 管理端口不映射到宿主机。配置由 `.env` 加 Compose 环境变量提供；真实凭证不要提交。
 
+管理员 token 对应单个 `ADMIN_ACTOR` 配置身份，MVP 不接受调用方通过自报 Header 选择审计人。默认消费处理预算为 90 秒，RocketMQ 消费超时为 2 分钟；启动配置会校验其覆盖三次 HTTP 超时、两段退避和结果落库余量。可用 `DELIVERY_BUDGET`、`MQ_CONSUME_TIMEOUT` 调整，但两者须保持预算小于消费超时。
+
 快速检查：
 
 ```powershell
@@ -71,8 +74,8 @@ Invoke-RestMethod -Uri "http://127.0.0.1:8080/api/v1/notifications/$($task.task_
 | `POST /api/v1/notifications` | 客户端 Bearer + `Idempotency-Key` | 同键同内容返回原 task；同键异内容 `409`；事务提交后 `202` |
 | `GET /api/v1/notifications/{id}` | 客户端 Bearer | 仅返回该客户端任务和尝试记录，不返回原请求头/正文 |
 | `GET /api/v1/notifications?status=FAILED&page=1&page_size=20` | 客户端 Bearer | 调用方隔离的分页查询，最大页大小 100 |
-| `PATCH /api/v1/admin/destinations/{id}/fast-fail` | 管理员 Bearer + `X-Admin-Actor` | 请求体 `{"enabled":true,"reason":"人工原因"}`；保存操作人、原因和时间 |
-| `POST /api/v1/admin/notifications/{id}/resolve` | 管理员 Bearer + `X-Admin-Actor` | 请求体 `{"conclusion":"人工核对结论"}`；只记录结论，不重放任务 |
+| `PATCH /api/v1/admin/destinations/{id}/fast-fail` | 管理员 Bearer | 请求体 `{"enabled":true,"reason":"人工原因"}`；保存配置的管理员操作人、原因和时间 |
+| `POST /api/v1/admin/notifications/{id}/resolve` | 管理员 Bearer | 请求体 `{"conclusion":"人工核对结论"}`；记录配置的管理员操作人和结论，不重放任务 |
 | `GET /healthz` | 无 | 进程存活 |
 | `GET /readyz` | 无 | MySQL、RocketMQ 客户端和配置 Broker TCP 探测；MQ 不可用时返回 503，API 在进程仍运行且 MySQL 可用时仍可持久化受理 |
 
@@ -95,7 +98,7 @@ cd /mnt/d/rc_notification
 bash scripts/verify-docker.sh
 ```
 
-脚本检查 Docker/Compose、构建固定版本的应用与 Go/race test-runner 镜像、启动隔离的 MySQL 8.4.8 + RocketMQ 5.5.0 + NameServer + mock target，使用健康检查等真实依赖就绪，运行 migration/Topic/Group 初始化、宿主机控制 Broker 停启场景和 Docker 内完整测试。最新完整验收 `20261013T214902Z-747fc6e8` 退出码为 0；包含真实重试/DLQ、Outbox 标记失败重复发布、结果保存失败及 SIGTERM 故障窗口。详见[验收记录](docs/verification.md)与[精简证据](docs/evidence/20261013T214902Z-747fc6e8/)。
+脚本检查 Docker/Compose、构建固定版本的应用与 Go/race test-runner 镜像、启动隔离的 MySQL 8.4.8 + RocketMQ 5.5.0 + NameServer + mock target，使用健康检查等真实依赖就绪，运行 migration/Topic/Group 初始化、宿主机控制 Broker 停启场景和 Docker 内完整测试。最新完整验收 `20261014T063922Z-6c5cb01c` 退出码为 0；包含真实重试/DLQ、持久化 HTTP 重试到期时间、Outbox 标记失败退避、管理员处置数据库错误、结果保存失败及 SIGTERM 故障窗口。详见[验收记录](docs/verification.md)与[精简证据](docs/evidence/20261014T063922Z-6c5cb01c/)。
 
 ## 人工异常闭环
 

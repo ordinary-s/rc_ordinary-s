@@ -1,0 +1,443 @@
+gofmt: no differences
+== go_vet ==
+== go_test ==
+?   	github.com/ordinary-s/rc_ordinary-s/cmd/healthcheck	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/cmd/migrate	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/cmd/mock-target	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/cmd/server	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/internal/api	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/internal/config	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/internal/delivery	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/internal/domain	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/internal/mq	[no test files]
+ok  	github.com/ordinary-s/rc_ordinary-s/internal/notification	0.004s
+?   	github.com/ordinary-s/rc_ordinary-s/internal/outbox	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/internal/store	[no test files]
+== go_race ==
+?   	github.com/ordinary-s/rc_ordinary-s/cmd/healthcheck	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/cmd/migrate	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/cmd/mock-target	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/cmd/server	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/internal/api	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/internal/config	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/internal/delivery	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/internal/domain	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/internal/mq	[no test files]
+ok  	github.com/ordinary-s/rc_ordinary-s/internal/notification	1.011s
+?   	github.com/ordinary-s/rc_ordinary-s/internal/outbox	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/internal/store	[no test files]
+== integration_compile ==
+ok  	github.com/ordinary-s/rc_ordinary-s/tests/integration	0.004s [no tests to run]
+== real_integration ==
+=== RUN   TestEndToEndWithMySQLAndRocketMQ
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/acceptance/idempotency/transaction
+time="2026-10-14T06:42:48Z" level=info msg="change the route for clients"
+time="2026-10-14T06:42:48Z" level=info msg="the topic route info changed" changeTo="{\"OrderTopicConf\":\"\",\"queueDatas\":[{\"brokerName\":\"notification-broker\",\"readQueueNums\":8,\"writeQueueNums\":8,\"perm\":6,\"topicSynFlag\":0}],\"brokerDatas\":[{\"cluster\":\"DefaultCluster\",\"brokerName\":\"notification-broker\",\"brokerAddrs\":{\"0\":\"broker:10911\"}}]}" changedFrom="<nil>" topic=notification_delivery
+time="2026-10-14T06:42:48Z" level=info msg="will remove client from clientMap" clientID=172.24.0.7@16896
+time="2026-10-14T06:42:48Z" level=info msg="The RMQClient stopping do rebalance" clientID=172.24.0.7@16896
+time="2026-10-14T06:42:48Z" level=info msg="The RMQClient stopping update topic route info." clientID=172.24.0.7@16896
+time="2026-10-14T06:42:49Z" level=info msg="sending heartbeat, but no producer and no consumer" clientId=172.24.0.7@16896
+time="2026-10-14T06:42:49Z" level=info msg="The RMQClient stopping clean off line broker and heart beat" clientID=172.24.0.7@16896
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/persisted_retry_due_survives_cancellation
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/resolution_database_failure_returns_500
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/outbox_publish_succeeds_but_local_mark_fails
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/case-sensitive_keys_and_concurrent_duplicate_submit
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/concurrent_tasks_keep_trace_and_task_log_context_paired
+time="2026-10-14T06:42:58Z" level=info msg="The RMQClient stopping persist offset" clientID=172.24.0.7@16896
+time="2026-10-14T06:42:58Z" level=info msg="The RMQClient stopping update name server domain info." clientID=172.24.0.7@16896
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/503_then_success
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/three_503_and_duplicate_MQ_delivery
+time="2026-10-14T06:42:59Z" level=info msg="change the route for clients"
+time="2026-10-14T06:42:59Z" level=info msg="the topic route info changed" changeTo="{\"OrderTopicConf\":\"\",\"queueDatas\":[{\"brokerName\":\"notification-broker\",\"readQueueNums\":8,\"writeQueueNums\":8,\"perm\":6,\"topicSynFlag\":0}],\"brokerDatas\":[{\"cluster\":\"DefaultCluster\",\"brokerName\":\"notification-broker\",\"brokerAddrs\":{\"0\":\"broker:10911\"}}]}" changedFrom="<nil>" topic=notification_delivery
+time="2026-10-14T06:42:59Z" level=info msg="The RMQClient stopping do rebalance" clientID=172.24.0.7@16896
+time="2026-10-14T06:42:59Z" level=info msg="will remove client from clientMap" clientID=172.24.0.7@16896
+time="2026-10-14T06:42:59Z" level=info msg="The RMQClient stopping update topic route info." clientID=172.24.0.7@16896
+time="2026-10-14T06:43:00Z" level=info msg="sending heartbeat, but no producer and no consumer" clientId=172.24.0.7@16896
+time="2026-10-14T06:43:00Z" level=info msg="The RMQClient stopping clean off line broker and heart beat" clientID=172.24.0.7@16896
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/fast_fail_and_manual_recovery
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/XML_and_form_bodies_remain_exact
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/outbox_plan_and_UTC_storage
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/database_exception_is_redelivered_by_RocketMQ
+time="2026-10-14T06:43:03Z" level=info msg="the consumer start beginning" consumerGroup=notification_retry_audit messageModel=Clustering unitMode=false
+time="2026-10-14T06:43:03Z" level=info msg="change the route for clients"
+time="2026-10-14T06:43:03Z" level=info msg="the topic route info changed" changeTo="{\"OrderTopicConf\":\"\",\"queueDatas\":[{\"brokerName\":\"notification-broker\",\"readQueueNums\":8,\"writeQueueNums\":8,\"perm\":6,\"topicSynFlag\":0}],\"brokerDatas\":[{\"cluster\":\"DefaultCluster\",\"brokerName\":\"notification-broker\",\"brokerAddrs\":{\"0\":\"broker:10911\"}}]}" changedFrom="<nil>" topic="%RETRY%notification_delivery_workers"
+time="2026-10-14T06:43:03Z" level=warning msg="query topic route from server error" underlayError="topic not exist"
+time="2026-10-14T06:43:03Z" level=warning msg="queryTopicRouteInfoFromServer return nil" topic="%RETRY%notification_retry_audit"
+time="2026-10-14T06:43:03Z" level=warning msg="query topic route from server error" underlayError="topic not exist"
+time="2026-10-14T06:43:03Z" level=warning msg="queryTopicRouteInfoFromServer return nil" topic="%RETRY%notification_retry_audit"
+time="2026-10-14T06:43:03Z" level=info msg="receive broker's notification to consumer group" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:03Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=1]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:03Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=1]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:03Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=2]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:03Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=2]" consumerGroup=notification_retry_audit offset=0
+time="2026-10-14T06:43:03Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=3]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:03Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=3]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:03Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=4]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:03Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=4]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:03Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=5]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:03Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=5]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:03Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=6]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:03Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=6]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:03Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=7]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:03Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=7]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:03Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=0]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:03Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=0]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:03Z" level=info msg="the MessageQueue changed, version also updated" changeTo=1791960183349870061 changedFrom=1791960183316273269
+time="2026-10-14T06:43:03Z" level=info msg="The PullThresholdForTopic is changed" changeTo=12800 changedFrom=102400
+time="2026-10-14T06:43:03Z" level=info msg="The PullThresholdSizeForTopic is changed" changeTo=6400 changedFrom=51200
+time="2026-10-14T06:43:03Z" level=info msg="MessageQueue do balance done" cidAllSize=1 clientID=172.24.0.7@16896 consumerGroup=notification_retry_audit mqAllSize=8 rebalanceResultSet="[MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=0] MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=1] MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=2] MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=3] MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=4] MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=5] MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=6] MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=7]]" rebalanceResultSize=8 topic="%RETRY%notification_delivery_workers"
+time="2026-10-14T06:43:03Z" level=warning msg="do balance in group failed, the topic does not exist" consumerGroup=notification_retry_audit topic="%RETRY%notification_retry_audit"
+time="2026-10-14T06:43:03Z" level=warning msg="do balance in group failed, the topic does not exist" consumerGroup=notification_retry_audit topic="%RETRY%notification_retry_audit"
+time="2026-10-14T06:43:09Z" level=info msg="The RMQClient stopping persist offset" clientID=172.24.0.7@16896
+time="2026-10-14T06:43:09Z" level=info msg="The RMQClient stopping update name server domain info." clientID=172.24.0.7@16896
+time="2026-10-14T06:43:13Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=5]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:13Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=6]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:13Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=7]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:13Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=0]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:13Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=1]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:13Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=2]" consumerGroup=notification_retry_audit offset=1
+time="2026-10-14T06:43:13Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=3]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:13Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=4]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:13Z" level=info msg="push consumer close pullConsumer listener." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:13Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:13Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=2]" consumerGroup=notification_retry_audit offset=1
+time="2026-10-14T06:43:13Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:13Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:13Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:13Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:13Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:13Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:13Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=3]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:13Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=4]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:13Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=5]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:13Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:13Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=6]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:13Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=7]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:13Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=0]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:13Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=1]" consumerGroup=notification_retry_audit offset=1
+time="2026-10-14T06:43:13Z" level=info msg="will remove client from clientMap" clientID=172.24.0.7@16896
+time="2026-10-14T06:43:13Z" level=info msg="The RMQClient stopping clean off line broker and heart beat" clientID=172.24.0.7@16896
+time="2026-10-14T06:43:13Z" level=info msg="The RMQClient stopping persist offset" clientID=172.24.0.7@16896
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/HTTP_success_result-write_retries_before_MQ_redelivery
+time="2026-10-14T06:43:13Z" level=info msg="The RMQClient stopping update name server domain info." clientID=172.24.0.7@16896
+time="2026-10-14T06:43:13Z" level=info msg="The RMQClient stopping do rebalance" clientID=172.24.0.7@16896
+time="2026-10-14T06:43:13Z" level=info msg="The RMQClient stopping update topic route info." clientID=172.24.0.7@16896
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/HTTP_success_result-write_exhaustion_redelivers_without_repeating_HTTP
+time="2026-10-14T06:43:14Z" level=info msg="the consumer start beginning" consumerGroup=notification_retry_audit messageModel=Clustering unitMode=false
+time="2026-10-14T06:43:14Z" level=info msg="change the route for clients"
+time="2026-10-14T06:43:14Z" level=info msg="the topic route info changed" changeTo="{\"OrderTopicConf\":\"\",\"queueDatas\":[{\"brokerName\":\"notification-broker\",\"readQueueNums\":8,\"writeQueueNums\":8,\"perm\":6,\"topicSynFlag\":0}],\"brokerDatas\":[{\"cluster\":\"DefaultCluster\",\"brokerName\":\"notification-broker\",\"brokerAddrs\":{\"0\":\"broker:10911\"}}]}" changedFrom="<nil>" topic="%RETRY%notification_delivery_workers"
+time="2026-10-14T06:43:14Z" level=info msg="change the route for clients"
+time="2026-10-14T06:43:14Z" level=info msg="the topic route info changed" changeTo="{\"OrderTopicConf\":\"\",\"queueDatas\":[{\"brokerName\":\"notification-broker\",\"readQueueNums\":8,\"writeQueueNums\":8,\"perm\":6,\"topicSynFlag\":0}],\"brokerDatas\":[{\"cluster\":\"DefaultCluster\",\"brokerName\":\"notification-broker\",\"brokerAddrs\":{\"0\":\"broker:10911\"}}]}" changedFrom="<nil>" topic="%RETRY%notification_retry_audit"
+time="2026-10-14T06:43:14Z" level=info msg="receive broker's notification to consumer group" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:14Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=6]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:14Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=6]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:14Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=7]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:14Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=7]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:14Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=0]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:14Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=0]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:14Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=1]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:14Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=1]" consumerGroup=notification_retry_audit offset=1
+time="2026-10-14T06:43:14Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=2]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:14Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=2]" consumerGroup=notification_retry_audit offset=1
+time="2026-10-14T06:43:14Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=3]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:14Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=3]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:14Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=4]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:14Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=4]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:14Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=5]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:14Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=5]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:14Z" level=info msg="the MessageQueue changed, version also updated" changeTo=1791960194194174097 changedFrom=1791960194177941281
+time="2026-10-14T06:43:14Z" level=info msg="The PullThresholdForTopic is changed" changeTo=12800 changedFrom=102400
+time="2026-10-14T06:43:14Z" level=info msg="The PullThresholdSizeForTopic is changed" changeTo=6400 changedFrom=51200
+time="2026-10-14T06:43:14Z" level=info msg="MessageQueue do balance done" cidAllSize=1 clientID=172.24.0.7@16896 consumerGroup=notification_retry_audit mqAllSize=8 rebalanceResultSet="[MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=0] MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=1] MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=2] MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=3] MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=4] MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=5] MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=6] MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=7]]" rebalanceResultSize=8 topic="%RETRY%notification_delivery_workers"
+time="2026-10-14T06:43:14Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=5]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:14Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=5]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:14Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=6]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:14Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=6]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:14Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=7]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:14Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=7]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:14Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=0]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:14Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=0]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:14Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=1]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:14Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=1]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:14Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=2]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:14Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=2]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:14Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=3]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:14Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=3]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:14Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=4]" consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:14Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=4]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:14Z" level=info msg="the MessageQueue changed, version also updated" changeTo=1791960194204922935 changedFrom=1791960194177976360
+time="2026-10-14T06:43:14Z" level=info msg="The PullThresholdForTopic is changed" changeTo=800 changedFrom=12800
+time="2026-10-14T06:43:14Z" level=info msg="The PullThresholdSizeForTopic is changed" changeTo=400 changedFrom=6400
+time="2026-10-14T06:43:14Z" level=info msg="MessageQueue do balance done" cidAllSize=1 clientID=172.24.0.7@16896 consumerGroup=notification_retry_audit mqAllSize=8 rebalanceResultSet="[MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=0] MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=1] MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=2] MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=3] MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=4] MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=5] MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=6] MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=7]]" rebalanceResultSize=8 topic="%RETRY%notification_retry_audit"
+time="2026-10-14T06:43:24Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=0]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:24Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=5]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:24Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=4]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:24Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=0]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:24Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=2]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:24Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=7]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:24Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=1]" consumerGroup=notification_retry_audit offset=1
+time="2026-10-14T06:43:24Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=4]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:24Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=5]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:24Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=1]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:24Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=6]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:24Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=2]" consumerGroup=notification_retry_audit offset=1
+time="2026-10-14T06:43:24Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=3]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:24Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=6]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:24Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=7]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:24Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=3]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="push consumer close pullConsumer listener." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:26Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:26Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:26Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:26Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:26Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:26Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:26Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:26Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:26Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:26Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:26Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:26Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:26Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:26Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:26Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:26Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:26Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=6]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=7]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=3]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=0]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=5]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=4]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=0]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=2]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=7]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=1]" consumerGroup=notification_retry_audit offset=1
+time="2026-10-14T06:43:26Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=4]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=5]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_retry_audit, brokerName=notification-broker, queueId=1]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=6]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=2]" consumerGroup=notification_retry_audit offset=2
+time="2026-10-14T06:43:26Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_delivery_workers, brokerName=notification-broker, queueId=3]" consumerGroup=notification_retry_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="will remove client from clientMap" clientID=172.24.0.7@16896
+time="2026-10-14T06:43:26Z" level=info msg="The RMQClient stopping clean off line broker and heart beat" clientID=172.24.0.7@16896
+time="2026-10-14T06:43:26Z" level=info msg="The RMQClient stopping do rebalance" clientID=172.24.0.7@16896
+time="2026-10-14T06:43:26Z" level=info msg="The RMQClient stopping persist offset" clientID=172.24.0.7@16896
+time="2026-10-14T06:43:26Z" level=info msg="The RMQClient stopping update topic route info." clientID=172.24.0.7@16896
+time="2026-10-14T06:43:26Z" level=info msg="The RMQClient stopping update name server domain info." clientID=172.24.0.7@16896
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/native_RocketMQ_retries_reach_DLQ
+time="2026-10-14T06:43:26Z" level=info msg="the consumer start beginning" consumerGroup=notification_dlq_audit messageModel=Clustering unitMode=false
+time="2026-10-14T06:43:26Z" level=warning msg="query topic route from server error" underlayError="topic not exist"
+time="2026-10-14T06:43:26Z" level=warning msg="queryTopicRouteInfoFromServer return nil" topic="%RETRY%notification_dlq_audit"
+time="2026-10-14T06:43:26Z" level=info msg="change the route for clients"
+time="2026-10-14T06:43:26Z" level=info msg="the topic route info changed" changeTo="{\"OrderTopicConf\":\"\",\"queueDatas\":[{\"brokerName\":\"notification-broker\",\"readQueueNums\":8,\"writeQueueNums\":8,\"perm\":6,\"topicSynFlag\":0}],\"brokerDatas\":[{\"cluster\":\"DefaultCluster\",\"brokerName\":\"notification-broker\",\"brokerAddrs\":{\"0\":\"broker:10911\"}}]}" changedFrom="<nil>" topic="%DLQ%notification_delivery_workers"
+time="2026-10-14T06:43:26Z" level=warning msg="query topic route from server error" underlayError="topic not exist"
+time="2026-10-14T06:43:26Z" level=warning msg="queryTopicRouteInfoFromServer return nil" topic="%RETRY%notification_dlq_audit"
+time="2026-10-14T06:43:26Z" level=info msg="receive broker's notification to consumer group" consumerGroup=notification_dlq_audit
+time="2026-10-14T06:43:26Z" level=warning msg="do balance in group failed, the topic does not exist" consumerGroup=notification_dlq_audit topic="%RETRY%notification_dlq_audit"
+time="2026-10-14T06:43:26Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=1]" consumerGroup=notification_dlq_audit
+time="2026-10-14T06:43:26Z" level=info msg="change the route for clients"
+time="2026-10-14T06:43:26Z" level=info msg="the topic route info changed" changeTo="{\"OrderTopicConf\":\"\",\"queueDatas\":[{\"brokerName\":\"notification-broker\",\"readQueueNums\":8,\"writeQueueNums\":8,\"perm\":6,\"topicSynFlag\":0}],\"brokerDatas\":[{\"cluster\":\"DefaultCluster\",\"brokerName\":\"notification-broker\",\"brokerAddrs\":{\"0\":\"broker:10911\"}}]}" changedFrom="<nil>" topic=notification_delivery
+time="2026-10-14T06:43:26Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=1]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=2]" consumerGroup=notification_dlq_audit
+time="2026-10-14T06:43:26Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=2]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=3]" consumerGroup=notification_dlq_audit
+time="2026-10-14T06:43:26Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=3]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=4]" consumerGroup=notification_dlq_audit
+time="2026-10-14T06:43:26Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=4]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=5]" consumerGroup=notification_dlq_audit
+time="2026-10-14T06:43:26Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=5]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=6]" consumerGroup=notification_dlq_audit
+time="2026-10-14T06:43:26Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=6]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=7]" consumerGroup=notification_dlq_audit
+time="2026-10-14T06:43:26Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=7]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=0]" consumerGroup=notification_dlq_audit
+time="2026-10-14T06:43:26Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=0]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:26Z" level=info msg="the MessageQueue changed, version also updated" changeTo=1791960206187945619 changedFrom=1791960206151139775
+time="2026-10-14T06:43:26Z" level=info msg="The PullThresholdForTopic is changed" changeTo=12800 changedFrom=102400
+time="2026-10-14T06:43:26Z" level=info msg="The PullThresholdSizeForTopic is changed" changeTo=6400 changedFrom=51200
+time="2026-10-14T06:43:26Z" level=info msg="MessageQueue do balance done" cidAllSize=1 clientID=172.24.0.7@16896 consumerGroup=notification_dlq_audit mqAllSize=8 rebalanceResultSet="[MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=0] MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=1] MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=2] MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=3] MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=4] MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=5] MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=6] MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=7]]" rebalanceResultSize=8 topic="%DLQ%notification_delivery_workers"
+time="2026-10-14T06:43:26Z" level=warning msg="do balance in group failed, the topic does not exist" consumerGroup=notification_dlq_audit topic="%RETRY%notification_dlq_audit"
+time="2026-10-14T06:43:33Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:33Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:33Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:33Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:33Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:33Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:33Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:33Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:33Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:33Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:33Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:33Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:33Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:33Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:36Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=3]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:36Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=4]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:36Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=5]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:36Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=6]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:36Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=7]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:36Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=0]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:36Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=1]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:36Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=2]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:41Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=6]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:41Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=7]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:41Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=0]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:41Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=1]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:41Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=2]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:41Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=3]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:41Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=4]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:41Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=5]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:43Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:43Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:44Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:44Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:44Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:44Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:44Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:44Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:44Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:44Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:44Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:44Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:44Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:44Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:44Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:44Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:44Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:44Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:44Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:44Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:44Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:44Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:44Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:44Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:44Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:44Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:44Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:44Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:44Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:44Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:44Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:44Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:46Z" level=warning msg="do balance in group failed, the topic does not exist" consumerGroup=notification_dlq_audit topic="%RETRY%notification_dlq_audit"
+time="2026-10-14T06:43:46Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=2]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:46Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=3]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:46Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=4]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:46Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=5]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:46Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=6]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:46Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=7]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:46Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=0]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:46Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=1]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:43:51Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=6]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:43:51Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=7]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:43:51Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=0]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:43:51Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=1]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:43:51Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=2]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:43:51Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=3]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:43:51Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=4]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:43:51Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=5]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:43:54Z" level=warning msg="pull message from broker error" broker="broker:10911" underlayError="request timeout"
+time="2026-10-14T06:43:54Z" level=info msg="push consumer close message handle." consumerGroup=notification_retry_audit
+time="2026-10-14T06:43:56Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=2]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:43:56Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=3]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:43:56Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=4]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:43:56Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=5]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:43:56Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=6]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:43:56Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=7]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:43:56Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=0]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:43:56Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=1]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:43:56Z" level=info msg="change the route for clients"
+time="2026-10-14T06:43:56Z" level=info msg="the topic route info changed" changeTo="{\"OrderTopicConf\":\"\",\"queueDatas\":[{\"brokerName\":\"notification-broker\",\"readQueueNums\":8,\"writeQueueNums\":8,\"perm\":6,\"topicSynFlag\":0}],\"brokerDatas\":[{\"cluster\":\"DefaultCluster\",\"brokerName\":\"notification-broker\",\"brokerAddrs\":{\"0\":\"broker:10911\"}}]}" changedFrom="<nil>" topic="%RETRY%notification_dlq_audit"
+time="2026-10-14T06:44:01Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=5]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:01Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=6]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:01Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=7]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:01Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=0]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:01Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=1]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:01Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=2]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:01Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=3]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:01Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=4]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=3]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=4]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=5]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=6]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=7]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=0]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=1]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=2]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:06Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=1]" consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=1]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:44:06Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=2]" consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=2]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:44:06Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=3]" consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=3]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:44:06Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=4]" consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=4]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:44:06Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=5]" consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=5]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:44:06Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=6]" consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=6]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:44:06Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=7]" consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=7]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:44:06Z" level=info msg="delete mq from offset table" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=0]" consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="fetch offset of mq from broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=0]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:44:06Z" level=info msg="the MessageQueue changed, version also updated" changeTo=1791960246154949284 changedFrom=1791960206151176750
+time="2026-10-14T06:44:06Z" level=info msg="The PullThresholdForTopic is changed" changeTo=800 changedFrom=12800
+time="2026-10-14T06:44:06Z" level=info msg="The PullThresholdSizeForTopic is changed" changeTo=400 changedFrom=6400
+time="2026-10-14T06:44:06Z" level=info msg="MessageQueue do balance done" cidAllSize=1 clientID=172.24.0.7@16896 consumerGroup=notification_dlq_audit mqAllSize=8 rebalanceResultSet="[MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=0] MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=1] MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=2] MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=3] MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=4] MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=5] MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=6] MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=7]]" rebalanceResultSize=8 topic="%RETRY%notification_dlq_audit"
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=2]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:06Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="push consumer close pullConsumer listener." consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=6]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:06Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=2]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:44:06Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=0]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=3]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:06Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="push consumer quit pullMessage for dropped queue." consumerGroup=notification_dlq_audit
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=5]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=6]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=5]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=7]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=0]" consumerGroup=notification_dlq_audit offset=1
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=1]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%DLQ%notification_delivery_workers, brokerName=notification-broker, queueId=4]" consumerGroup=notification_dlq_audit offset=0
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=1]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=3]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=4]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:44:06Z" level=info msg="update offset to broker success" MessageQueue="MessageQueue [topic=%RETRY%notification_dlq_audit, brokerName=notification-broker, queueId=7]" consumerGroup=notification_dlq_audit offset=-1
+time="2026-10-14T06:44:06Z" level=info msg="The RMQClient stopping do rebalance" clientID=172.24.0.7@16896
+time="2026-10-14T06:44:06Z" level=info msg="will remove client from clientMap" clientID=172.24.0.7@16896
+time="2026-10-14T06:44:06Z" level=info msg="The RMQClient stopping update topic route info." clientID=172.24.0.7@16896
+time="2026-10-14T06:44:06Z" level=info msg="The RMQClient stopping update name server domain info." clientID=172.24.0.7@16896
+time="2026-10-14T06:44:06Z" level=info msg="The RMQClient stopping persist offset" clientID=172.24.0.7@16896
+time="2026-10-14T06:44:06Z" level=info msg="The RMQClient stopping clean off line broker and heart beat" clientID=172.24.0.7@16896
+--- PASS: TestEndToEndWithMySQLAndRocketMQ (78.14s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/acceptance/idempotency/transaction (1.65s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/persisted_retry_due_survives_cancellation (2.07s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/resolution_database_failure_returns_500 (0.23s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/outbox_publish_succeeds_but_local_mark_fails (4.88s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/case-sensitive_keys_and_concurrent_duplicate_submit (0.22s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/concurrent_tasks_keep_trace_and_task_log_context_paired (1.34s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/503_then_success (0.38s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/three_503_and_duplicate_MQ_delivery (2.05s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/fast_fail_and_manual_recovery (1.87s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/XML_and_form_bodies_remain_exact (0.24s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/outbox_plan_and_UTC_storage (0.00s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/database_exception_is_redelivered_by_RocketMQ (10.34s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/HTTP_success_result-write_retries_before_MQ_redelivery (0.46s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/HTTP_success_result-write_exhaustion_redelivers_without_repeating_HTTP (12.04s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/native_RocketMQ_retries_reach_DLQ (40.12s)
+PASS
+ok  	github.com/ordinary-s/rc_ordinary-s/tests/integration	78.146s

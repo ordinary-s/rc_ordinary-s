@@ -20,6 +20,9 @@ EVIDENCE="$ROOT/docs/evidence/$RUN_ID"
 mkdir -p "$REPORT" "$EVIDENCE"
 export APP_IMAGE=rc-notification:0.1.0
 export TEST_IMAGE=rc-notification-test:0.1.0
+export ADMIN_ACTOR=integration-test
+export DELIVERY_BUDGET=90s
+export MQ_CONSUME_TIMEOUT=2m
 export VERIFY_RUN_ID="$RUN_ID"
 export APP_BIND=127.0.0.1
 export APP_PORT=$((24000 + RANDOM % 20000))

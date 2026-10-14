@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -24,6 +25,11 @@ import (
 	"github.com/apache/rocketmq-client-go/v2/primitive"
 	"github.com/apache/rocketmq-client-go/v2/producer"
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/ordinary-s/rc_ordinary-s/internal/config"
+	"github.com/ordinary-s/rc_ordinary-s/internal/delivery"
+	"github.com/ordinary-s/rc_ordinary-s/internal/mq"
+	"github.com/ordinary-s/rc_ordinary-s/internal/notification"
+	"github.com/ordinary-s/rc_ordinary-s/internal/store"
 )
 
 type taskView struct {
@@ -115,6 +121,9 @@ func TestEndToEndWithMySQLAndRocketMQ(t *testing.T) {
 		}
 		s.record("acceptance_transaction_and_idempotency", map[string]any{"task_id": id, "notifications": notifications, "outboxes": outboxes, "outbox_state": state, "mock_calls": stats.Count, "after_duplicate": 1})
 	})
+
+	t.Run("persisted retry due survives cancellation", s.testPersistedRetryDue)
+	t.Run("resolution database failure returns 500", s.testResolutionDatabaseFailure)
 	t.Run("outbox publish succeeds but local mark fails", s.testOutboxMarkFailure)
 
 	t.Run("case-sensitive keys and concurrent duplicate submit", func(t *testing.T) {
@@ -504,7 +513,9 @@ func (s *suite) testOutboxMarkFailure(t *testing.T) {
 	if _, err := s.db.Exec(`DROP TABLE IF EXISTS e2e_outbox_mark_failures`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.Exec(`CREATE TABLE e2e_outbox_mark_failures (id INT PRIMARY KEY, failures INT NOT NULL) ENGINE=MyISAM`); err != nil {
+	if _, err := s.db.Exec(`CREATE TABLE e2e_outbox_mark_failures (
+		id INT PRIMARY KEY, failures INT NOT NULL, first_at DATETIME(6) NULL, second_at DATETIME(6) NULL
+	) ENGINE=MyISAM`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.db.Exec(`INSERT INTO e2e_outbox_mark_failures (id, failures) VALUES (1, 0)`); err != nil {
@@ -512,7 +523,10 @@ func (s *suite) testOutboxMarkFailure(t *testing.T) {
 	}
 	if _, err := s.db.Exec(`CREATE TRIGGER e2e_fail_outbox_mark BEFORE UPDATE ON outbox FOR EACH ROW BEGIN
 		IF OLD.publish_state = 'PENDING' AND NEW.publish_state = 'PUBLISHED' THEN
-			UPDATE e2e_outbox_mark_failures SET failures = failures + 1 WHERE id = 1;
+			UPDATE e2e_outbox_mark_failures SET
+				first_at = IF(failures = 0, UTC_TIMESTAMP(6), first_at),
+				second_at = IF(failures = 1, UTC_TIMESTAMP(6), second_at),
+				failures = failures + 1 WHERE id = 1;
 			SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'controlled outbox acknowledgement update failure';
 		END IF;
 	END`); err != nil {
@@ -540,6 +554,14 @@ func (s *suite) testOutboxMarkFailure(t *testing.T) {
 	if markFailures < 2 {
 		t.Fatalf("outbox mark failure did not cause repeated publish attempts: failures=%d", markFailures)
 	}
+	var firstMarkFailure, secondMarkFailure time.Time
+	if err := s.db.QueryRow(`SELECT first_at, second_at FROM e2e_outbox_mark_failures WHERE id = 1`).Scan(&firstMarkFailure, &secondMarkFailure); err != nil {
+		t.Fatal(err)
+	}
+	markRetryDelay := secondMarkFailure.Sub(firstMarkFailure)
+	if markRetryDelay < 800*time.Millisecond {
+		t.Fatalf("outbox mark failure retry was not backed off: interval=%s", markRetryDelay)
+	}
 	drop()
 	deadline = time.Now().Add(10 * time.Second)
 	var publishState string
@@ -560,7 +582,142 @@ func (s *suite) testOutboxMarkFailure(t *testing.T) {
 	if stats.Count != 1 || task.Notification.HTTPAttempts != 1 {
 		t.Fatalf("duplicate published events repeated HTTP: calls=%d attempts=%d", stats.Count, task.Notification.HTTPAttempts)
 	}
-	s.record("outbox_send_mark_failure_duplicate_safe", map[string]any{"task_id": id, "local_mark_failures": markFailures, "outbox_state_after_recovery": publishState, "mock_calls_after_duplicate_window": stats.Count, "http_attempts": task.Notification.HTTPAttempts})
+	s.record("outbox_send_mark_failure_duplicate_safe", map[string]any{"task_id": id, "local_mark_failures": markFailures, "mark_retry_interval_ms": markRetryDelay.Milliseconds(), "outbox_state_after_recovery": publishState, "mock_calls_after_duplicate_window": stats.Count, "http_attempts": task.Notification.HTTPAttempts})
+}
+
+func (s *suite) testPersistedRetryDue(t *testing.T) {
+	s.reset(t)
+	s.configureRetryAfter(t, []int{503, 200}, "2")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	repository, err := store.Open(ctx, env(t, "TEST_DB_DSN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repository.Close()
+	taskID, err := notification.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	traceID := "retry-due-" + taskID[:8]
+	_, err = s.db.Exec(`INSERT INTO notification
+		(task_id, client_id, idempotency_key, request_fingerprint, destination_id, http_method, request_headers, request_body, trace_id, status, http_attempts, created_at, updated_at, expires_at)
+		VALUES (?, 'integration-test', ?, ?, 'mock-target', 'POST', JSON_OBJECT(), ?, ?, 'PENDING', 0, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), ?)`,
+		taskID, "retry-due-"+taskID, make([]byte, 32), []byte("persist retry due"), traceID, time.Now().UTC().Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := delivery.New(config.Config{
+		HTTPTimeout: 1 * time.Second, DeliveryBudget: 20 * time.Second,
+		Backoffs: []time.Duration{20 * time.Millisecond, 40 * time.Millisecond},
+	}, repository, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	event := mq.Event{EventID: taskID, TaskID: taskID, TraceID: traceID}
+	processCtx, stopFirst := context.WithCancel(context.Background())
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- engine.Process(processCtx, event, 0) }()
+	deadline := time.Now().Add(5 * time.Second)
+	var due sql.NullTime
+	for time.Now().Before(deadline) {
+		var attempts int
+		if err := s.db.QueryRow(`SELECT next_attempt_at, http_attempts FROM notification WHERE task_id = ?`, taskID).Scan(&due, &attempts); err != nil {
+			t.Fatal(err)
+		}
+		if due.Valid && attempts == 1 {
+			break
+		}
+		select {
+		case err := <-firstDone:
+			t.Fatalf("first Process returned before retry due was stored: %v", err)
+		default:
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !due.Valid {
+		t.Fatal("retry due was not persisted")
+	}
+	stopFirst()
+	if err := <-firstDone; err == nil {
+		t.Fatal("canceled processing unexpectedly acknowledged before retry due")
+	}
+	if count := s.stats(t).Count; count != 1 {
+		t.Fatalf("first processing call count=%d, want 1", count)
+	}
+	secondCtx, stopSecond := context.WithTimeout(context.Background(), 10*time.Second)
+	defer stopSecond()
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- engine.Process(secondCtx, event, 1) }()
+	for time.Now().Before(due.Time.Add(-100 * time.Millisecond)) {
+		if count := s.stats(t).Count; count != 1 {
+			t.Fatalf("persisted retry due was bypassed: mock calls=%d before %s", count, due.Time.Format(time.RFC3339Nano))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second processing invocation: %v", err)
+	}
+	var status string
+	var httpAttempts int
+	if err := s.db.QueryRow(`SELECT status, http_attempts FROM notification WHERE task_id = ?`, taskID).Scan(&status, &httpAttempts); err != nil {
+		t.Fatal(err)
+	}
+	stats := s.stats(t)
+	if status != "DELIVERED" || httpAttempts != 2 || stats.Count != 2 {
+		t.Fatalf("persisted retry result mismatch: status=%s attempts=%d calls=%d", status, httpAttempts, stats.Count)
+	}
+	s.record("persisted_retry_due_survives_context_cancellation", map[string]any{"task_id": taskID, "due_at": due.Time.UTC(), "http_attempts": httpAttempts, "mock_calls": stats.Count, "result": status})
+}
+
+func (s *suite) testResolutionDatabaseFailure(t *testing.T) {
+	s.reset(t)
+	s.configure(t, []int{400})
+	id := s.submit(t, "resolution-db-error", "text/plain", "terminal failure")
+	s.wait(t, id, "FAILED")
+	if _, err := s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_resolution`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`CREATE TRIGGER e2e_fail_resolution BEFORE UPDATE ON notification FOR EACH ROW BEGIN
+		IF NEW.resolved_by IS NOT NULL AND (OLD.resolved_by IS NULL OR NEW.resolved_by <> OLD.resolved_by) THEN
+			SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'controlled resolution database failure';
+		END IF;
+	END`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _, _ = s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_resolution`) })
+	body, _ := json.Marshal(map[string]string{"conclusion": "verified"})
+	req, _ := http.NewRequest(http.MethodPost, s.api+"/api/v1/admin/notifications/"+id+"/resolve", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.admin)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("resolution database failure status=%d, want 500", resp.StatusCode)
+	}
+	if _, err := s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_resolution`); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	retryReq, _ := http.NewRequest(http.MethodPost, s.api+"/api/v1/admin/notifications/"+id+"/resolve", bytes.NewReader(body))
+	retryReq.Header.Set("Content-Type", "application/json")
+	retryReq.Header.Set("Authorization", "Bearer "+s.admin)
+	if resp, err = s.client.Do(retryReq); err != nil {
+		t.Fatal(err)
+	} else {
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("resolution after database recovery status=%d, want 200", resp.StatusCode)
+		}
+	}
+	var actor string
+	if err := s.db.QueryRow(`SELECT resolved_by FROM notification WHERE task_id = ?`, id).Scan(&actor); err != nil {
+		t.Fatal(err)
+	}
+	if actor != env(t, "TEST_ADMIN_ACTOR") {
+		t.Fatalf("resolution audit actor=%q, want %q", actor, env(t, "TEST_ADMIN_ACTOR"))
+	}
+	s.record("resolution_database_failure_maps_to_500_then_recovers", map[string]any{"task_id": id, "first_http_status": http.StatusInternalServerError, "recovered_http_status": http.StatusOK, "audit_actor": actor})
 }
 
 func (s *suite) testResultWriteExhaustion(t *testing.T) {
@@ -926,7 +1083,6 @@ func (s *suite) fastFail(t *testing.T, enabled bool) {
 	req, _ := http.NewRequest(http.MethodPatch, s.api+"/api/v1/admin/destinations/mock-target/fast-fail", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.admin)
-	req.Header.Set("X-Admin-Actor", "integration-test")
 	resp, err := s.client.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -934,6 +1090,28 @@ func (s *suite) fastFail(t *testing.T, enabled bool) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("fast-fail status=%d", resp.StatusCode)
+	}
+	var actor string
+	if err := s.db.QueryRow(`SELECT updated_by FROM destination WHERE destination_id='mock-target'`).Scan(&actor); err != nil {
+		t.Fatal(err)
+	}
+	if actor != env(t, "TEST_ADMIN_ACTOR") {
+		t.Fatalf("fast-fail audit actor=%q, want configured actor %q", actor, env(t, "TEST_ADMIN_ACTOR"))
+	}
+}
+
+func (s *suite) configureRetryAfter(t *testing.T, statuses []int, retryAfter string) {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{"statuses": statuses, "retry_after": retryAfter, "response_body": "controlled"})
+	req, _ := http.NewRequest(http.MethodPost, s.mock+"/control/configure", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("configure Retry-After status=%d", resp.StatusCode)
 	}
 }
 

@@ -19,12 +19,15 @@ type Config struct {
 	ClientID            string
 	ClientToken         string
 	AdminToken          string
+	AdminActor          string
 	DestinationID       string
 	DestinationURL      string
 	AllowedTarget       string
 	ConsumerConcurrency int
 	MaxReconsume        int32
 	HTTPTimeout         time.Duration
+	DeliveryBudget      time.Duration
+	MQConsumeTimeout    time.Duration
 	TaskTTL             time.Duration
 	Backoffs            []time.Duration
 	OutboxPoll          time.Duration
@@ -44,12 +47,15 @@ func Load() (Config, error) {
 		ClientID:            env("CLIENT_ID", "demo-client"),
 		ClientToken:         env("CLIENT_TOKEN", "demo-client-token"),
 		AdminToken:          env("ADMIN_TOKEN", "demo-admin-token"),
+		AdminActor:          env("ADMIN_ACTOR", "local-admin"),
 		DestinationID:       env("DESTINATION_ID", "mock-target"),
 		DestinationURL:      env("DESTINATION_URL", "http://mock-target:8090/notify"),
 		AllowedTarget:       env("ALLOWED_TARGET", "http://mock-target:8090"),
 		ConsumerConcurrency: 4,
 		MaxReconsume:        8,
 		HTTPTimeout:         10 * time.Second,
+		DeliveryBudget:      90 * time.Second,
+		MQConsumeTimeout:    2 * time.Minute,
 		TaskTTL:             30 * time.Minute,
 		Backoffs:            []time.Duration{10 * time.Second, 20 * time.Second},
 		OutboxPoll:          time.Second,
@@ -64,6 +70,12 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if c.HTTPTimeout, err = durationEnv("HTTP_TIMEOUT", c.HTTPTimeout); err != nil {
+		return Config{}, err
+	}
+	if c.DeliveryBudget, err = durationEnv("DELIVERY_BUDGET", c.DeliveryBudget); err != nil {
+		return Config{}, err
+	}
+	if c.MQConsumeTimeout, err = durationEnv("MQ_CONSUME_TIMEOUT", c.MQConsumeTimeout); err != nil {
 		return Config{}, err
 	}
 	if c.TaskTTL, err = durationEnv("TASK_TTL", c.TaskTTL); err != nil {
@@ -89,13 +101,35 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("HTTP_BACKOFFS values must not be negative")
 		}
 	}
-	if c.HTTPTimeout <= 0 || c.TaskTTL <= 0 || c.OutboxPoll <= 0 {
+	if c.HTTPTimeout <= 0 || c.DeliveryBudget <= 0 || c.MQConsumeTimeout <= 0 || c.TaskTTL <= 0 || c.OutboxPoll <= 0 {
 		return Config{}, fmt.Errorf("timeouts and polling interval must be positive")
 	}
-	if strings.TrimSpace(c.ClientToken) == "" || strings.TrimSpace(c.AdminToken) == "" {
-		return Config{}, fmt.Errorf("client and admin tokens must be configured")
+	minimumDeliveryBudget := 3*c.HTTPTimeout + c.Backoffs[0] + c.Backoffs[1] + 950*time.Millisecond + 5*time.Second
+	if c.DeliveryBudget < minimumDeliveryBudget {
+		return Config{}, fmt.Errorf("DELIVERY_BUDGET must cover three HTTP timeouts, both backoffs, result persistence, and margin (at least %s)", minimumDeliveryBudget)
+	}
+	if c.DeliveryBudget+5*time.Second > c.MQConsumeTimeout {
+		return Config{}, fmt.Errorf("MQ_CONSUME_TIMEOUT must exceed DELIVERY_BUDGET by at least 5s")
+	}
+	if strings.TrimSpace(c.ClientToken) == "" || strings.TrimSpace(c.AdminToken) == "" || strings.TrimSpace(c.AdminActor) == "" {
+		return Config{}, fmt.Errorf("client token, admin token, and admin actor must be configured")
+	}
+	if !validActor(c.AdminActor) {
+		return Config{}, fmt.Errorf("ADMIN_ACTOR must be 1-64 letters, digits, dots, underscores, or hyphens")
 	}
 	return c, nil
+}
+
+func validActor(actor string) bool {
+	if actor == "" || len(actor) > 64 {
+		return false
+	}
+	for _, r := range actor {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 func env(key, fallback string) string {

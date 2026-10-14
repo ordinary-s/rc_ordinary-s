@@ -130,6 +130,9 @@ services:
       CLIENT_ID: demo-client
       CLIENT_TOKEN: ${CLIENT_TOKEN:-demo-client-token}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-demo-admin-token}
+      ADMIN_ACTOR: ${ADMIN_ACTOR:-local-admin}
+      DELIVERY_BUDGET: ${DELIVERY_BUDGET:-90s}
+      MQ_CONSUME_TIMEOUT: ${MQ_CONSUME_TIMEOUT:-2m}
       DESTINATION_ID: mock-target
       DESTINATION_URL: http://mock-target:8090/notify
       ALLOWED_TARGET: http://mock-target:8090
@@ -169,6 +172,7 @@ services:
       TEST_API_URL: http://app:8080
       TEST_CLIENT_TOKEN: ${CLIENT_TOKEN:-demo-client-token}
       TEST_ADMIN_TOKEN: ${ADMIN_TOKEN:-demo-admin-token}
+      TEST_ADMIN_ACTOR: ${ADMIN_ACTOR:-local-admin}
       TEST_DB_DSN: "root:${MYSQL_ROOT_PASSWORD:-notification-root-local}@tcp(mysql:3306)/notifications?parseTime=true&loc=UTC&charset=utf8mb4"
       TEST_MOCK_URL: http://mock-target:8090
       ROCKETMQ_NAMESRV: namesrv:9876

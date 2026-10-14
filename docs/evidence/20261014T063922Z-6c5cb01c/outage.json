@@ -1,0 +1,15 @@
+{
+  "scenarios": [
+    {
+      "details": {
+        "expired_task": "1f7e7051-6ba6-4c15-b33d-f2fcfa67fd6d",
+        "expired_task_calls": 0,
+        "fresh_task": "07b49bc6-8b79-4627-ad9e-c3a0f155491a",
+        "fresh_task_calls": 1,
+        "outbox_state": "PUBLISHED"
+      },
+      "name": "broker_outage_outbox_recovery_and_task_expiry",
+      "passed": true
+    }
+  ]
+}

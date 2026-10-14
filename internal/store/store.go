@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -13,8 +12,9 @@ import (
 )
 
 var (
-	ErrNotFound = errors.New("not found")
-	ErrConflict = errors.New("idempotency conflict")
+	ErrNotFound    = errors.New("not found")
+	ErrConflict    = errors.New("idempotency conflict")
+	ErrNotEligible = errors.New("notification is not eligible for manual resolution")
 )
 
 type Store struct {
@@ -40,8 +40,6 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
-
-func (s *Store) DB() *sql.DB { return s.db }
 
 func (s *Store) GetDestination(ctx context.Context, id string) (domain.Destination, error) {
 	var d domain.Destination
@@ -109,12 +107,12 @@ func (s *Store) Accept(ctx context.Context, n domain.Notification) (domain.Notif
 func (s *Store) findByIdempotency(ctx context.Context, clientID, key string) (domain.Notification, error) {
 	var n domain.Notification
 	err := s.db.QueryRowContext(ctx, `SELECT task_id, client_id, idempotency_key, request_fingerprint, destination_id, http_method,
-		request_headers, request_body, trace_id, status, http_attempts, COALESCE(result_reason, ''), COALESCE(http_status, 0), created_at, expires_at,
+		request_headers, request_body, trace_id, status, http_attempts, COALESCE(result_reason, ''), COALESCE(http_status, 0), created_at, expires_at, next_attempt_at,
 		COALESCE(resolved_by, ''), COALESCE(resolution, ''), resolved_at
 		FROM notification WHERE client_id = ? AND idempotency_key = ?`, clientID, key).Scan(
 		&n.ID, &n.ClientID, &n.IdempotencyKey, &n.Fingerprint, &n.DestinationID, &n.Method,
 		&n.HeadersJSON, &n.Body, &n.TraceID, &n.Status, &n.HTTPAttempts, &n.ResultReason, &n.HTTPStatus,
-		&n.CreatedAt, &n.ExpiresAt, &n.ResolvedBy, &n.Resolution, &n.ResolvedAt)
+		&n.CreatedAt, &n.ExpiresAt, &n.NextAttemptAt, &n.ResolvedBy, &n.Resolution, &n.ResolvedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Notification{}, ErrNotFound
 	}
@@ -127,12 +125,12 @@ func (s *Store) findByIdempotency(ctx context.Context, clientID, key string) (do
 func (s *Store) GetNotification(ctx context.Context, id string) (domain.Notification, error) {
 	var n domain.Notification
 	err := s.db.QueryRowContext(ctx, `SELECT task_id, client_id, idempotency_key, request_fingerprint, destination_id, http_method,
-		request_headers, request_body, trace_id, status, http_attempts, COALESCE(result_reason, ''), COALESCE(http_status, 0), created_at, expires_at,
+		request_headers, request_body, trace_id, status, http_attempts, COALESCE(result_reason, ''), COALESCE(http_status, 0), created_at, expires_at, next_attempt_at,
 		COALESCE(resolved_by, ''), COALESCE(resolution, ''), resolved_at
 		FROM notification WHERE task_id = ?`, id).Scan(
 		&n.ID, &n.ClientID, &n.IdempotencyKey, &n.Fingerprint, &n.DestinationID, &n.Method,
 		&n.HeadersJSON, &n.Body, &n.TraceID, &n.Status, &n.HTTPAttempts, &n.ResultReason, &n.HTTPStatus,
-		&n.CreatedAt, &n.ExpiresAt, &n.ResolvedBy, &n.Resolution, &n.ResolvedAt)
+		&n.CreatedAt, &n.ExpiresAt, &n.NextAttemptAt, &n.ResolvedBy, &n.Resolution, &n.ResolvedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Notification{}, ErrNotFound
 	}
@@ -195,7 +193,7 @@ func (s *Store) StartAttempt(ctx context.Context, taskID string, attemptNo int) 
 		return fmt.Errorf("begin attempt transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	result, err := tx.ExecContext(ctx, `UPDATE notification SET status = 'PROCESSING', http_attempts = ?
+	result, err := tx.ExecContext(ctx, `UPDATE notification SET status = 'PROCESSING', http_attempts = ?, next_attempt_at = NULL
 		WHERE task_id = ? AND status IN ('PENDING', 'PROCESSING') AND http_attempts = ?`, attemptNo, taskID, attemptNo-1)
 	if err != nil {
 		return fmt.Errorf("reserve HTTP attempt: %w", err)
@@ -218,7 +216,7 @@ func (s *Store) StartAttempt(ctx context.Context, taskID string, attemptNo int) 
 	return nil
 }
 
-func (s *Store) CompleteAttempt(ctx context.Context, taskID string, attemptNo, httpStatus int, attemptState, nextTaskStatus, reason string) error {
+func (s *Store) CompleteAttempt(ctx context.Context, taskID string, attemptNo, httpStatus int, attemptState, nextTaskStatus, reason string, nextAttemptAt *time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin attempt result transaction: %w", err)
@@ -236,25 +234,27 @@ func (s *Store) CompleteAttempt(ctx context.Context, taskID string, attemptNo, h
 		}
 		var storedAttemptState, storedAttemptReason, storedTaskStatus, storedTaskReason string
 		var storedAttemptHTTP, storedTaskHTTP sql.NullInt64
+		var storedNextAttempt sql.NullTime
 		var storedAttempts int
 		if err := tx.QueryRowContext(ctx, `SELECT a.state, a.http_status, a.error_summary,
-			n.status, n.http_status, n.result_reason, n.http_attempts
+			n.status, n.http_status, n.result_reason, n.http_attempts, n.next_attempt_at
 			FROM delivery_attempt a JOIN notification n ON n.task_id = a.task_id
 			WHERE a.task_id = ? AND a.attempt_no = ?`, taskID, attemptNo).Scan(
 			&storedAttemptState, &storedAttemptHTTP, &storedAttemptReason,
-			&storedTaskStatus, &storedTaskHTTP, &storedTaskReason, &storedAttempts,
+			&storedTaskStatus, &storedTaskHTTP, &storedTaskReason, &storedAttempts, &storedNextAttempt,
 		); err != nil {
 			return fmt.Errorf("read previously saved attempt result: %w", err)
 		}
+		dueMatches := nextAttemptAt == nil && !storedNextAttempt.Valid || nextAttemptAt != nil && storedNextAttempt.Valid && storedNextAttempt.Time.Equal(*nextAttemptAt)
 		if storedAttemptState == attemptState && storedAttemptHTTP.Valid && int(storedAttemptHTTP.Int64) == httpStatus &&
 			storedAttemptReason == reason && storedTaskStatus == nextTaskStatus && storedTaskHTTP.Valid &&
-			int(storedTaskHTTP.Int64) == httpStatus && storedTaskReason == reason && storedAttempts == attemptNo {
+			int(storedTaskHTTP.Int64) == httpStatus && storedTaskReason == reason && storedAttempts == attemptNo && dueMatches {
 			return nil
 		}
 		return fmt.Errorf("attempt %d result differs from the previously saved result", attemptNo)
 	}
-	result, err = tx.ExecContext(ctx, `UPDATE notification SET status = ?, http_status = ?, result_reason = ?, updated_at = UTC_TIMESTAMP(6)
-		WHERE task_id = ? AND status = 'PROCESSING' AND http_attempts = ?`, nextTaskStatus, httpStatus, reason, taskID, attemptNo)
+	result, err = tx.ExecContext(ctx, `UPDATE notification SET status = ?, http_status = ?, result_reason = ?, next_attempt_at = ?, updated_at = UTC_TIMESTAMP(6)
+		WHERE task_id = ? AND status = 'PROCESSING' AND http_attempts = ?`, nextTaskStatus, httpStatus, reason, nextAttemptAt, taskID, attemptNo)
 	if err != nil {
 		return fmt.Errorf("save notification result: %w", err)
 	}
@@ -272,7 +272,7 @@ func (s *Store) CompleteAttempt(ctx context.Context, taskID string, attemptNo, h
 }
 
 func (s *Store) FinishWithoutAttempt(ctx context.Context, taskID, status, reason string) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE notification SET status = ?, result_reason = ?, updated_at = UTC_TIMESTAMP(6)
+	result, err := s.db.ExecContext(ctx, `UPDATE notification SET status = ?, result_reason = ?, next_attempt_at = NULL, updated_at = UTC_TIMESTAMP(6)
 		WHERE task_id = ? AND status IN ('PENDING', 'PROCESSING')`, status, reason, taskID)
 	if err != nil {
 		return fmt.Errorf("save terminal notification result: %w", err)
@@ -286,7 +286,7 @@ func (s *Store) FinishWithoutAttempt(ctx context.Context, taskID, status, reason
 		if err != nil {
 			return err
 		}
-		if isTerminal(n.Status) {
+		if domain.IsTerminal(n.Status) {
 			return nil
 		}
 		return fmt.Errorf("notification %s is not eligible for terminal update", taskID)
@@ -344,7 +344,10 @@ func (s *Store) Resolve(ctx context.Context, taskID, actor, resolution string) (
 		if getErr != nil {
 			return domain.Notification{}, getErr
 		}
-		return n, fmt.Errorf("notification is not eligible for resolution")
+		if n.Status == domain.StatusFailed || n.Status == domain.StatusFastFailed || n.Status == domain.StatusExpired || n.Status == domain.StatusUncertain {
+			return n, nil
+		}
+		return n, ErrNotEligible
 	}
 	return s.GetNotification(ctx, taskID)
 }
@@ -396,15 +399,6 @@ func (s *Store) DeferOutbox(ctx context.Context, eventID, summary string, delay 
 	return nil
 }
 
-func isTerminal(status string) bool {
-	switch status {
-	case domain.StatusDelivered, domain.StatusFailed, domain.StatusFastFailed, domain.StatusExpired, domain.StatusUncertain:
-		return true
-	default:
-		return false
-	}
-}
-
 func equalBytes(a, b []byte) bool {
 	if len(a) != len(b) {
 		return false
@@ -415,13 +409,4 @@ func equalBytes(a, b []byte) bool {
 		}
 	}
 	return true
-}
-
-func NameServerReachable(ctx context.Context, address string, timeout time.Duration) error {
-	dialer := net.Dialer{Timeout: timeout}
-	conn, err := dialer.DialContext(ctx, "tcp", address)
-	if err != nil {
-		return fmt.Errorf("connect nameserver: %w", err)
-	}
-	return conn.Close()
 }

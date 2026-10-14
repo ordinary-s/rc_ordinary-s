@@ -1,0 +1,139 @@
+{
+  "source_commit": "9ed109dce1a7e3373e052d06c7d343c1ba63c652",
+  "checked_at_utc": "2026-10-14T07:02:24.8352812Z",
+  "non_document_diff": [],
+  "files": [
+    {
+      "path": ".dockerignore",
+      "sha256": "B1558BC67A58EA0867F23835C68705C61EC327A3A1CF937A766BA2F47C48A52B"
+    },
+    {
+      "path": ".env.example",
+      "sha256": "D87E13D57EADB658D29EB8D058F52D7F4D2D7268530ED7DA28F9814EF0F1105E"
+    },
+    {
+      "path": ".gitattributes",
+      "sha256": "3E38AFC1F59F610626896005BD4D8580CBE29A6EECD93676BADAB811D8BEABF5"
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "1ADA207DAAF7B595BDFD38827C0CC6BD87E7F98A8567E779BFC2E848CAB2CD40"
+    },
+    {
+      "path": "Dockerfile",
+      "sha256": "D02DAB2EFCC6185FFDB5F5D3BB583DEDFC2DD15E1ED5973DBCF79684456CD9D7"
+    },
+    {
+      "path": "cmd/healthcheck/main.go",
+      "sha256": "AB1D589D0E5CAD7F1D70D7EB809E545E7DB2B2A146FD91229CDA0CB6B98EE503"
+    },
+    {
+      "path": "cmd/migrate/main.go",
+      "sha256": "1374A901D581F459AF041BE6EF50C468E5D810A1242B5C3A5E9E3030950AF97B"
+    },
+    {
+      "path": "cmd/mock-target/main.go",
+      "sha256": "DAA6BEA6712139887D1199D65117251189AE5AA625B83589708F3ABDFDED561A"
+    },
+    {
+      "path": "cmd/server/main.go",
+      "sha256": "C7929C2884B5EA709AB5A367E48F8938C2D11DBDDFEDEC6F2FBAC5E6FD1255EB"
+    },
+    {
+      "path": "compose.verify.yaml",
+      "sha256": "518E3893A68B2FEFFFFD3D4030E71D12A5C539F67755C23AB6491B8486104FB0"
+    },
+    {
+      "path": "compose.yaml",
+      "sha256": "C13E3C8847D00A531E423A7B9F42284C6A5C271D22AAB3E10CE0FBC6425C76EB"
+    },
+    {
+      "path": "docker/broker.conf",
+      "sha256": "797C4E2B3759F1164EA663795F41F6F7F9E93BA82104A8B08C9549579C7D252E"
+    },
+    {
+      "path": "go.mod",
+      "sha256": "E9186D4698A98A5A393A95314F81AFE27BE7B7B2CEA5EB5DF2AC591E6D69DFE7"
+    },
+    {
+      "path": "go.sum",
+      "sha256": "65071F6170080125D84E9709D83B94887B60944DA0FE6817D8D92122AFADB69C"
+    },
+    {
+      "path": "internal/api/server.go",
+      "sha256": "D24EBA0EE8D7AEEA118C5CE9984E0EDDE41447961BB5F68DB913081C7D903F34"
+    },
+    {
+      "path": "internal/config/config.go",
+      "sha256": "06D141351F8294C34FB69E9D88483D20D95F225209427F8F053A79EB5BAFD1AC"
+    },
+    {
+      "path": "internal/delivery/engine.go",
+      "sha256": "993CEE9CFB4877CA41D137273E569290C2756E37625E25DEA95A96A3CF5E46FE"
+    },
+    {
+      "path": "internal/domain/model.go",
+      "sha256": "D3677E3136387DA1FF63CAFC94F1376FC87F6825C88A00FF6D1CD877BD2FE2E1"
+    },
+    {
+      "path": "internal/mq/rocket.go",
+      "sha256": "40C25808A1A7BE1FBF542857ABD4EE80AEE17894EF861969285D9D553505E395"
+    },
+    {
+      "path": "internal/notification/accept.go",
+      "sha256": "9E38D5E590B5D827D89D4F79039E462AFAC3828C9E9231809181C5A1996C0BC4"
+    },
+    {
+      "path": "internal/notification/accept_test.go",
+      "sha256": "D276D1DEA73A9C139E5B4A0D8BCB4571D9EF95F57A77A8592F47EB42B1D31B89"
+    },
+    {
+      "path": "internal/outbox/publisher.go",
+      "sha256": "06719CDB2AD8BB9D0FA046368A68BD852C94A850232F65616486B883BD4AA58F"
+    },
+    {
+      "path": "internal/store/store.go",
+      "sha256": "D119E1D6396A15B7C9DFCDC4B65804ED59D779AB4F8FEDA089F962533599EE21"
+    },
+    {
+      "path": "migrations/001_initial.sql",
+      "sha256": "9B5CB3F5E2F77670B0FC7137C466720F9F9C0053C190005A0B8A04377A34B4FE"
+    },
+    {
+      "path": "migrations/002_notification_retry_due.sql",
+      "sha256": "C91CA725E9DF10B070BD96A07EEE427E4780A63C6D608504BC9FC192984ABD95"
+    },
+    {
+      "path": "scripts/dev-up.ps1",
+      "sha256": "A341D3438A453CCA6B20E2624274248F0A996CB7EE8E6F9540E223ACBB7C4AFD"
+    },
+    {
+      "path": "scripts/init-rocketmq.sh",
+      "sha256": "8B051E8818D2A716DE612DF7410F9B18F15641DDF62A57E10EEB3ABC6B171C77"
+    },
+    {
+      "path": "scripts/mysql-runtime-user.sh",
+      "sha256": "237176CF4DC45D1BF0AAC0780290933EED692A1DEE84E7E0D5BBD4FBCF204699"
+    },
+    {
+      "path": "scripts/verify-docker.ps1",
+      "sha256": "AA79043A4DB3FB5271808322FDE20B8C7D0FFA43126FC132342F9F6D900ADD84"
+    },
+    {
+      "path": "scripts/verify-docker.sh",
+      "sha256": "E1E0B3FC74EEE397A35004C0D90A8EB1495E6FB267AB8AE60176D9E8BE71297E"
+    },
+    {
+      "path": "scripts/verify-in-container.sh",
+      "sha256": "FEAE4E9B40F380F7CB819D649AC01768326EA109A7D1C2EC7C443A8E1AE45478"
+    },
+    {
+      "path": "tests/integration/e2e_test.go",
+      "sha256": "1102E81732E3C3AE52A4579F53D8FBF02B9BF87AA51A9462FAB07E31B25F46A4"
+    }
+  ],
+  "scope_note": "Documentation review: source files match the pre-review hash inventory. This is not a retroactive hash attestation for the archived Docker run.",
+  "source_hash_changes_after_review": [],
+  "non_document_diff_after_review": [],
+  "verified_after_review_at_utc": "2026-10-14T07:16:24.411916+00:00"
+}

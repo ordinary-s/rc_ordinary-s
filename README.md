@@ -2,6 +2,8 @@
 
 这是一个可运行、可复现的 Go 通知服务作业实现：HTTP API 将通知任务与 Outbox 事件写入同一个 MySQL 事务；Publisher 将小型事件投递到真实 RocketMQ；同一 Go 进程中的消费者按任务执行外部 HTTP。当前服务按单实例设计。
 
+文档源码基线为 `9ed109d`。完整设计、候选来源和实现差异已分别整理，阅读入口见 [docs/README.md](docs/README.md)。**已归档 Docker 验收 `20261014T063922Z-6c5cb01c` 为 PASS**；运行日期、命令、真实场景与保证范围见[验收记录](docs/verification.md)。该结论对应指定运行，不将本次文档修订称为新一次 Docker 通过。
+
 ## 边界与语义
 
 - RocketMQ 内部消息采用至少一次交付，重复消费由 task 状态和尝试记录去重。
@@ -33,10 +35,12 @@
 
 ```powershell
 Set-Location 'D:\rc_notification'
-Copy-Item .env.example .env
+if (-not (Test-Path -LiteralPath '.env')) { Copy-Item .env.example .env }
 # 按本机使用需要改掉仅供演示的示例凭证
 .\scripts\dev-up.ps1
 ```
+
+仅首次启动且尚无 `.env` 时复制示例，已有本地配置应保留。先用 `docker info` 检查引擎；本 Windows 机器若未启动，运行 `& 'C:\Users\admin\.codex\scripts\Start-DockerDesktop.ps1'`，等待引擎就绪后再运行上述脚本。已运行的引擎无需重启。
 
 演示应用绑定到 `127.0.0.1:8080`，MySQL 和 MQ 管理端口不映射到宿主机。配置由 `.env` 加 Compose 环境变量提供；真实凭证不要提交。
 
@@ -98,18 +102,18 @@ cd /mnt/d/rc_notification
 bash scripts/verify-docker.sh
 ```
 
-脚本检查 Docker/Compose、构建固定版本的应用与 Go/race test-runner 镜像、启动隔离的 MySQL 8.4.8 + RocketMQ 5.5.0 + NameServer + mock target，使用健康检查等真实依赖就绪，运行 migration/Topic/Group 初始化、宿主机控制 Broker 停启场景和 Docker 内完整测试。最新完整验收 `20261014T063922Z-6c5cb01c` 退出码为 0；包含真实重试/DLQ、持久化 HTTP 重试到期时间、Outbox 标记失败退避、管理员处置数据库错误、结果保存失败及 SIGTERM 故障窗口。详见[验收记录](docs/verification.md)与[精简证据](docs/evidence/20261014T063922Z-6c5cb01c/)。
+脚本检查 Docker/Compose、构建锁定版本的应用与 Go/race test-runner 镜像、启动隔离的 MySQL 8.4.8 + RocketMQ 5.5.0 + NameServer + mock target，等待真实依赖健康，运行 migration/Topic/Group 初始化、Broker 停启和 Docker 内完整测试。覆盖真实重试/DLQ、持久化 HTTP 重试时间、Outbox 标记失败、管理员处置错误、结果保存失败及 SIGTERM。指定已归档运行的 ID、退出码、源码归属及精简证据见[验收记录](docs/verification.md)，保留其原始时间和结果。
 
 ## 人工异常闭环
 
-按 `status=FAILED` 或 `status=UNCERTAIN` 查询任务 API，检查投递尝试和 `result_reason`；管理员通过 resolve 接口记录核对结论。原生死信 topic 为 `%DLQ%notification_delivery_workers`。RocketMQ 管理工具在 Broker 镜像内可查询/导出：
+按 `status=FAILED` 或 `status=UNCERTAIN` 查询任务 API，检查尝试和 `result_reason`。resolve 只允许 FAILED、FAST_FAILED、EXPIRED、UNCERTAIN，保存结论但不改状态、不重发。原生 DLQ 中仍为 PENDING/PROCESSING 或根本不存在的任务无法用此接口结案，当前须另存受控处置记录，详见[实现审查 R03](docs/implementation-review.md#r03dlq-消息不一定能通过现有-resolve-接口闭环)。原生死信 topic 为 `%DLQ%notification_delivery_workers`。RocketMQ 管理工具在 Broker 镜像内可查询：
 
 ```bash
 docker compose -p rcnotif-dev exec broker /home/rocketmq/rocketmq-5.5.0/bin/mqadmin consumerStatus -n namesrv:9876 -g notification_delivery_workers
-docker compose -p rcnotif-dev exec broker /home/rocketmq/rocketmq-5.5.0/bin/mqadmin printMsg -n namesrv:9876 -t '%DLQ%notification_delivery_workers' -c 20
+docker compose -p rcnotif-dev exec broker /home/rocketmq/rocketmq-5.5.0/bin/mqadmin printMsg -n namesrv:9876 -t '%DLQ%notification_delivery_workers' -c UTF-8 -d false
 ```
 
-先用该版本 `mqadmin help printMsg` 核对可用参数，再将必要消息导出到受控目录供负责人核对；MVP 不自动把 DLQ 同步成数据库待办，不自动重放死信或已终态任务。
+本次已在锁定版本的 Broker 镜像运行 `mqadmin help printMsg`：`-c` 是字符集，旧示例 `-c 20` 不能用于限制条数，已修正；`-d false` 关闭正文打印。需要检查小事件中的 task/event ID 时，在受控终端按需开启正文，留存仅保留必要标识、时间和核对结论。MVP 不自动把 DLQ 同步成数据库待办，不自动重放死信或已终态任务。
 
 ## 文档导航
 
@@ -120,7 +124,11 @@ docker compose -p rcnotif-dev exec broker /home/rocketmq/rocketmq-5.5.0/bin/mqad
 - [AI 使用说明](AI_USAGE.md)
 - [Go/MySQL/RocketMQ 工程规范](docs/standards.md)
 - [Docker 验收记录与证据链接](docs/verification.md)
+- [候选包逐章对齐与历史规则](docs/reference-alignment.md)
+- [实现一致性审查与残余差异](docs/implementation-review.md)
 
 ## 已知限制
 
 单实例、单 MySQL、单 Broker；没有全局机构 QPS 配额、自动熔断/半开、严格顺序、通用供应商响应映射、凭证刷新平台、自动 DLQ 重放或审批后台。宿主机意外断电/单 Broker 损坏不具备高可用保证。同步刷盘与命名卷只提升本机验收拓扑的持久性，不构成备份或跨故障域容灾。
+
+快速失败按消费者观察到的配置生效，配置更新与发出请求之间仍有竞态；已有在途请求不会撤销。执行时目标复核、DDL 中断恢复、部分日志关联和锁等待预算也有已记录边界，见[实现审查](docs/implementation-review.md)。本次仅改文档，没有将这些问题描述为已修复。

@@ -1,0 +1,62 @@
+{
+  "generated_at_utc": "2026-10-14T07:23:45.221347+00:00",
+  "git_head": "9ed109dce1a7e3373e052d06c7d343c1ba63c652",
+  "scope": [
+    "README.md",
+    "AI_USAGE.md",
+    "docs/assignment-answers.md",
+    "docs/decisions.md",
+    "docs/design.md",
+    "docs/implementation-review.md",
+    "docs/README.md",
+    "docs/reference-alignment.md",
+    "docs/requirements-mapping.md",
+    "docs/standards.md",
+    "docs/verification.md"
+  ],
+  "sha256": {
+    "README.md": "c4c3dedf633fda0f4165b0a20069b103789f8afa69eb72edb0a0615b54e4cfad",
+    "AI_USAGE.md": "1f8fddc6441356a99ea1c1272d37b5ccbca6f3d38d922cbaa8b8a2dcd3b8d631",
+    "docs/assignment-answers.md": "0b69193783ea72dcaadac391ec11ba046de09b90d6ab31a6e8709995a4db90f3",
+    "docs/decisions.md": "5b8ad325f1716a1c6d017d53e55280a2c0f2c26272a2e03e969f52bc1a262260",
+    "docs/design.md": "939251a90e875480f61732f5b462ce2a25dc0dceb42c700198142f5e9504852b",
+    "docs/implementation-review.md": "d9189bdff388e66de966ccbc0d6ef40734ae62211e62cc40646fc04c31853e99",
+    "docs/README.md": "f29535269fe538411bbaa657bfa77ff19151edc6a501dcd8cd3f3370ebf5c148",
+    "docs/reference-alignment.md": "3aa1780d619d660fa9347e6e562c3a77dff47fa3ca8d7acc8e501e68539ec49b",
+    "docs/requirements-mapping.md": "d95e2415e9c729f44a2fe8cfaafbe09b5d2565bec27ed9e00319636fcbdefead",
+    "docs/standards.md": "b26d7616cf88999ac0f6aeac7f09e766f13168d201f0dc81191e15bdf453764d",
+    "docs/verification.md": "62bd2fc27fceefbb8bd0f7ababcf55fe3b2b549542661db5d893deb2c89bbb23"
+  },
+  "status": "PASS_SCOPED_HEURISTICS",
+  "metrics": {
+    "fences": 10,
+    "files": 11,
+    "lines": 1266,
+    "headings": 109,
+    "relative_links": 229,
+    "tables": 33,
+    "relative_anchors": 2,
+    "external_links_not_fetched": 27
+  },
+  "issues": [],
+  "manual_review_note": "Reviewed legacy-rule contexts as history, rejected proposals, or future scope; no obsolete business rule presented as current. README Bearer literals are documented demo values.",
+  "scope_note": "Passed documentation checks only. Docker evidence is cited separately by its original accepted run ID.",
+  "limitations": [
+    "Read-only scope is README.md, AI_USAGE.md and docs/*.md, excluding evidence and logs.",
+    "Markdown and GitHub heading anchor checks are local heuristics, not full renderer validation.",
+    "External HTTP links are inventoried but not fetched by this script.",
+    "Credential values are never included in output; pattern scanning is not a complete security proof.",
+    "Legacy-rule context classification requires human review and cannot prove semantic consistency.",
+    "This report does not establish Docker acceptance or source-code correctness.",
+    "The script is a local ignored audit helper and is not intended for the documentation commit."
+  ],
+  "credential_review": {
+    "unresolved_matches": 0,
+    "documented_demo_bearer_literals": 2,
+    "values_included": false
+  },
+  "legacy_rule_review": {
+    "unresolved_matches": 0,
+    "reviewed_contexts": "History, rejected proposals, future scope, or explicit negation; no obsolete rule presented as current."
+  }
+}

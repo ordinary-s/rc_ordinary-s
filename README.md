@@ -1,8 +1,8 @@
 # HTTP 通知服务 MVP
 
-这是一个可运行、可复现的 Go 通知服务作业实现：HTTP API 将通知任务与 Outbox 事件写入同一个 MySQL 事务；Publisher 将小型事件投递到真实 RocketMQ；同一 Go 进程中的消费者按任务执行外部 HTTP。当前服务按单实例设计。
+这是一个基于 Go、MySQL/InnoDB 和 Apache RocketMQ 的 HTTP 通知服务。HTTP API 将通知任务与 Outbox 事件写入同一个 MySQL 事务；Publisher 将小型事件投递到 RocketMQ；同一 Go 进程中的消费者按任务执行外部 HTTP。当前服务按单实例设计。
 
-文档源码基线为 `9ed109d`。完整设计、候选来源和实现差异已分别整理，阅读入口见下方[文档导航](#文档导航)。**已归档 Docker 验收 `20261014T063922Z-6c5cb01c` 为 PASS**；运行日期、命令、真实场景与保证范围见[验收记录](docs/verification.md)。该结论对应指定运行，不将本次文档修订称为新一次 Docker 通过。
+完整设计、技术取舍和实现边界见下方[文档导航](#文档导航)。**已归档 Docker 验收 `20261014T063922Z-6c5cb01c` 为 PASS**；运行日期、命令、真实场景与保证范围见[验收记录](docs/verification.md)。该结果适用于记录中的运行环境与场景。
 
 ## 边界与语义
 
@@ -27,7 +27,7 @@
                      结果可靠保存 <--- 单条消费 + 有界并发 ---+--- HTTP(S) 目标
 ```
 
-细节见[设计说明](docs/design.md)。题目逐项回答见[assignment answers](docs/assignment-answers.md)，讨论决策见[决策表](docs/decisions.md)，Go/MySQL/RocketMQ 依据与落点见[工程规范](docs/standards.md)。
+细节见[设计说明](docs/design.md)。系统边界、可靠性和扩容分析见[题目逐项答复](docs/assignment-answers.md)，技术选型与代价见[设计决策](docs/decisions.md)。
 
 ## 本机启动
 
@@ -113,7 +113,7 @@ docker compose -p rcnotif-dev exec broker /home/rocketmq/rocketmq-5.5.0/bin/mqad
 docker compose -p rcnotif-dev exec broker /home/rocketmq/rocketmq-5.5.0/bin/mqadmin printMsg -n namesrv:9876 -t '%DLQ%notification_delivery_workers' -c UTF-8 -d false
 ```
 
-本次已在锁定版本的 Broker 镜像运行 `mqadmin help printMsg`：`-c` 是字符集，旧示例 `-c 20` 不能用于限制条数，已修正；`-d false` 关闭正文打印。需要检查小事件中的 task/event ID 时，在受控终端按需开启正文，留存仅保留必要标识、时间和核对结论。MVP 不自动把 DLQ 同步成数据库待办，不自动重放死信或已终态任务。
+在锁定版本的 Broker 镜像中，`-c` 指定字符集，`-d false` 关闭正文打印。需要检查小事件中的 task/event ID 时，在受控终端按需开启正文，留存仅保留必要标识、时间和核对结论。MVP 不自动把 DLQ 同步成数据库待办，不自动重放死信或已终态任务。
 
 ## 文档导航
 
@@ -124,9 +124,6 @@ docker compose -p rcnotif-dev exec broker /home/rocketmq/rocketmq-5.5.0/bin/mqad
 | 了解选择原因与代价 | [设计决策](docs/decisions.md) | 初始建议、最终决定、修改理由、收益、代价与实现状态。 |
 | 区分 AI 建议和用户决定 | [AI 使用说明](AI_USAGE.md) | 可追溯的方案、纠正、辅助实现与实际验证经历。 |
 | 核对代码是否满足设计 | [实现与证据核对表](docs/implementation-review.md) | 代码位置、实际行为、目标差异、风险及建议。 |
-| 查看要求覆盖 | [要求映射](docs/requirements-mapping.md) | 要求来源、对应文档、实现位置和证据状态。 |
-| 了解候选稿如何合并 | [参考资料与文档对齐](docs/reference-alignment.md) | 11 项对照、历史规则、候选章节映射与来源边界。 |
-| 维护和审查工程实现 | [工程规范](docs/standards.md) | Go、SQL、事务、日志、安全、并发、资源与验收约束。 |
 | 判断哪些检查实际运行过 | [Docker 验收记录](docs/verification.md) | 已归档通过验收的时间、命令、退出码、真实依赖场景及能力边界。 |
 
 首次阅读建议从本页进入完整设计，再按需要查看题目答复和决策记录。评审实现时，结合实现核对表与验收记录，分别判断代码存在、归档场景已测试和能力保证范围。机构限流、分组隔离、多实例全局配额、自动熔断和独立扩容属于后续演进，归档验收不构成这些能力的实现或性能证明。
@@ -135,4 +132,4 @@ docker compose -p rcnotif-dev exec broker /home/rocketmq/rocketmq-5.5.0/bin/mqad
 
 单实例、单 MySQL、单 Broker；没有全局机构 QPS 配额、自动熔断/半开、严格顺序、通用供应商响应映射、凭证刷新平台、自动 DLQ 重放或审批后台。宿主机意外断电/单 Broker 损坏不具备高可用保证。同步刷盘与命名卷只提升本机验收拓扑的持久性，不构成备份或跨故障域容灾。
 
-快速失败按消费者观察到的配置生效，配置更新与发出请求之间仍有竞态；已有在途请求不会撤销。执行时目标复核、DDL 中断恢复、部分日志关联和锁等待预算也有已记录边界，见[实现审查](docs/implementation-review.md)。本次仅改文档，没有将这些问题描述为已修复。
+快速失败按消费者观察到的配置生效，配置更新与发出请求之间仍有竞态；已有在途请求不会撤销。执行时目标复核、DDL 中断恢复、部分日志关联和锁等待预算也有已记录边界，具体分析与改进建议见[实现审查](docs/implementation-review.md)。

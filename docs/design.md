@@ -1,6 +1,6 @@
 # API 通知系统：完整设计与实现边界
 
-本文以源码基线 `9ed109dce1a7e3373e052d06c7d343c1ba63c652` 和本次用户确认的最终规则为依据。设计目标、当前实现、后续演进分别说明；偏差见[实现审查](implementation-review.md)，运行成绩以[验收记录](verification.md)为准。候选包与历史规则的合并过程见[来源对齐](reference-alignment.md)。
+本文以源码基线 `9ed109dce1a7e3373e052d06c7d343c1ba63c652` 和本次用户确认的最终规则为依据。设计目标、当前实现、后续演进分别说明；偏差见[实现审查](implementation-review.md)，运行成绩以[验收记录](verification.md)为准。
 
 ## 1. 业务背景与系统定位
 
@@ -32,7 +32,7 @@ MVP 将 API、Outbox 发布器和消费者放在一个 Go 进程。模块职责�
 | Apache RocketMQ | 分发、消费进度、执行异常原生重试/DLQ | 保留成熟队列恢复能力；需管理 NameServer、Broker、SDK 和路由兼容 |
 | Transactional Outbox | 发布责任与任务同事务提交，后台补发 | 解决数据库与 MQ 双写窗口；允许重复消息，增加扫描与状态更新成本 |
 
-版本、镜像 digest 和规范依据见[工程规范](standards.md)。当前为 Go 1.27.2、MySQL 8.4.8、RocketMQ 5.5.0、`rocketmq-client-go/v2 v2.1.2`。这是 Remoting SDK，使用 NameServer/Broker，不混用另一套 gRPC SDK 或 Proxy API。RabbitMQ 仅保留在[历史决策](decisions.md)与[组件替代分析](assignment-answers.md)中。
+版本与镜像 digest 以 [Dockerfile](../Dockerfile)、[Compose 配置](../compose.yaml) 和 [go.mod](../go.mod) 为准，归档运行环境见[验收记录](verification.md)。当前为 Go 1.27.2、MySQL 8.4.8、RocketMQ 5.5.0、`rocketmq-client-go/v2 v2.1.2`。这是 Remoting SDK，使用 NameServer/Broker，不混用另一套 gRPC SDK 或 Proxy API。RabbitMQ 仅保留在[历史决策](decisions.md)与[组件替代分析](assignment-answers.md)中。
 
 ## 4. 完整处理流程
 

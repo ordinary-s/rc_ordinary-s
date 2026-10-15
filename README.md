@@ -44,42 +44,33 @@ if (-not (Test-Path -LiteralPath '.env')) { Copy-Item .env.example .env }
 .\scripts\dev-up.ps1
 ```
 
-首次使用时复制 `.env.example`，已有配置保持不变。示例凭证只用于本地演示，实际使用前应替换。默认应用地址为 `http://127.0.0.1:8080`，MySQL 和 MQ 管理端口不映射到宿主机。
+首次使用时复制 `.env.example`，已有配置保持不变。示例 Bearer token 和 HMAC 密钥只用于本机演示，不能用于共享或生产环境。应用默认监听 `https://127.0.0.1:8443`，TLS 最低版本为 1.3；MySQL 和 MQ 管理端口不映射到宿主机。`dev-up.ps1` 导出本地演示 CA 到被 Git 忽略的 `.local-certs/ca.crt`。
 
 ```powershell
 docker compose -p rcnotif-dev ps
-Invoke-RestMethod http://127.0.0.1:8080/healthz
-Invoke-RestMethod http://127.0.0.1:8080/readyz
+curl.exe --ssl-no-revoke --cacert .local-certs\ca.crt https://localhost:8443/healthz
+curl.exe --ssl-no-revoke --cacert .local-certs\ca.crt https://localhost:8443/readyz
 ```
 
-`/healthz` 检查进程存活，`/readyz` 检查 MySQL、MQ 客户端状态和 Broker TCP 连通性。默认配置及超时参数见 [.env.example](.env.example) 和[设计说明](docs/design.md)。
+这里的 `--ssl-no-revoke` 只为没有 CRL/OCSP 的本地演示证书跳过吊销查询，仍通过 `--cacert` 验证证书链；不要把它用于生产客户端。`/healthz` 检查进程存活，`/readyz` 检查 MySQL、MQ 客户端状态和 Broker TCP 连通性。默认配置及超时参数见 [.env.example](.env.example) 和[设计说明](docs/design.md)。本地证书只用于演示；部署时应使用受信任证书。若在受控 HTTPS 网关终止外部 TLS，网关到应用仍须通过 TLS 1.3，并限制应用只接受该网关的流量。本实现按应用收到的 URI 验签，不支持也不信任未经认证的原始 URI 转发头。
 
 ## API 与调用示例
 
-客户端身份由 Bearer 凭证映射到 `CLIENT_ID`，不接受请求体自报身份。以下示例使用 `.env.example` 的演示 token；修改配置后需替换为相应值。
+所有 `/api/*` 路由都要求 HTTPS、Bearer token 和 RFC 9421 `hmac-sha256` 请求签名。签名还覆盖 `Content-Digest`（RFC 9530）、方法、authority、目标 URI、路径和 Authorization；通知提交额外覆盖 `Idempotency-Key`，并要求有效时间与一次性 nonce。服务把已用 nonce 写入 MySQL，阻止签名重放。Bearer token 与签名密钥分别校验；客户端和管理员使用不同 key ID/密钥。签名验证来源与完整性，不加密内容，也不能替代 TLS。
 
 ```powershell
-$headers = @{
-  Authorization = 'Bearer demo-client-token'
-  'Idempotency-Key' = 'order-2026-001'
-}
-$body = @{
-  destination_id = 'mock-target'
-  method = 'POST'
-  headers = @{ 'Content-Type' = 'application/json' }
-  body = '{"order_id":"2026-001"}'
-} | ConvertTo-Json -Depth 5
-$task = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/api/v1/notifications -Headers $headers -ContentType 'application/json' -Body $body
-Invoke-RestMethod -Uri "http://127.0.0.1:8080/api/v1/notifications/$($task.task_id)" -Headers @{ Authorization = 'Bearer demo-client-token' }
+docker compose -p rcnotif-dev --profile verify run --rm --build test-runner go run ./cmd/demo-client
 ```
+
+该容器示例使用 `.env` 中的本地演示 token/密钥和 CA，打印 TLS 协商版本及 `202` 响应。真实客户端应使用自己的密钥管理和 RFC 9421 实现为每个请求生成新 nonce，不能复用签名头。生产环境至少替换两组 32 字节以上的随机 HMAC 密钥与 Bearer token，并通过密钥管理流程轮换；不要提交 `.env`。
 
 | 接口 | 鉴权 | 说明 |
 |---|---|---|
-| `POST /api/v1/notifications` | 客户端 Bearer + `Idempotency-Key` | 同键同内容返回原任务；同键异内容 `409`；事务提交后返回 `202` |
-| `GET /api/v1/notifications/{id}` | 客户端 Bearer | 查询当前客户端的任务与尝试记录，不返回原请求头或正文 |
-| `GET /api/v1/notifications?status=FAILED&page=1&page_size=20` | 客户端 Bearer | 按状态分页查询，最大页大小 100 |
-| `PATCH /api/v1/admin/destinations/{id}/fast-fail` | 管理员 Bearer | 请求体 `{"enabled":true,"reason":"人工原因"}`；记录配置身份、原因和时间 |
-| `POST /api/v1/admin/notifications/{id}/resolve` | 管理员 Bearer | 请求体 `{"conclusion":"人工核对结论"}`；记录结论，不改变投递状态或重放任务 |
+| `POST /api/v1/notifications` | HTTPS + 客户端 Bearer + HMAC 签名 + `Idempotency-Key` | 同键同内容返回原任务；同键异内容 `409`；事务提交后返回 `202` |
+| `GET /api/v1/notifications/{id}` | HTTPS + 客户端 Bearer + HMAC 签名 | 查询当前客户端的任务与尝试记录，不返回原请求头或正文 |
+| `GET /api/v1/notifications?status=FAILED&page=1&page_size=20` | HTTPS + 客户端 Bearer + HMAC 签名 | 按状态分页查询，最大页大小 100 |
+| `PATCH /api/v1/admin/destinations/{id}/fast-fail` | HTTPS + 管理员 Bearer + 管理员 HMAC 签名 | 请求体 `{"enabled":true,"reason":"人工原因"}`；记录配置身份、原因和时间 |
+| `POST /api/v1/admin/notifications/{id}/resolve` | HTTPS + 管理员 Bearer + 管理员 HMAC 签名 | 请求体 `{"conclusion":"人工核对结论"}`；记录结论，不改变投递状态或重放任务 |
 | `GET /healthz` | 无 | 检查进程存活 |
 | `GET /readyz` | 无 | 检查依赖可用性；MQ 不可用时返回 503 |
 
@@ -87,7 +78,7 @@ Invoke-RestMethod -Uri "http://127.0.0.1:8080/api/v1/notifications/$($task.task_
 
 ## 测试与验证
 
-2026-10-14 的归档 Docker 验收通过，覆盖 Go 格式和静态检查、单元测试、race 测试，以及真实 MySQL、RocketMQ、应用和 mock target 的集成链路。重点场景包括三次 503 后终止、重复消息、快速失败、结果写库故障、Broker 中断恢复和 SIGTERM。具体环境、命令、结果与证据见[验收报告](docs/verification.md)。
+最新 Docker 验收 `20261015T074216Z-479b6b19` 退出码为 0；TLS/HMAC 场景和真实 MySQL/RocketMQ E2E 结果见[验收报告](docs/verification.md)及[精简证据](docs/evidence/20261015T074216Z-479b6b19/)。
 
 在项目根目录运行完整验收：
 
@@ -124,6 +115,8 @@ docker compose -p rcnotif-dev exec broker /home/rocketmq/rocketmq-5.5.0/bin/mqad
 | [题目逐项答复](docs/assignment-answers.md) | 系统边界、可靠性、AI 取舍、未来演进与中间件选择 |
 | [设计决策](docs/decisions.md) | 备选方案、选择理由、收益和代价 |
 | [AI 使用说明](AI_USAGE.md) | AI 参与范围、关键选择及具体实现案例 |
+| [工程规范映射](docs/standards.md) | Go、MySQL、RocketMQ 与 TLS/HMAC 规则及自动验证位置 |
+| [要求映射](docs/requirements-mapping.md) | 作业/用户约束到文档、代码与证据的对应关系 |
 | [验收报告](docs/verification.md) | 测试方法、实际结果和可查阅的原始报告 |
 | [已知限制与改进方向](docs/implementation-review.md) | 当前实现的边界、改进建议及源码依据 |
 
@@ -131,4 +124,4 @@ docker compose -p rcnotif-dev exec broker /home/rocketmq/rocketmq-5.5.0/bin/mqad
 
 当前采用单应用、单 MySQL、单 Broker，尚未提供多实例执行协调、机构级 QPS 配额、自动熔断或高可用部署，也没有生产吞吐量的压测结论。共享消费者资源意味着慢机构可能影响其他机构，后续需要结合负载引入分组隔离。
 
-三次上限针对 HTTP 业务尝试，Go Transport 在部分连接故障下可能内部重试；快速失败开关也不会撤销已经在途的请求，配置读取与发送之间存在竞态。发送时目标复核、迁移中断恢复、异常日志与锁等待预算等问题详见[已知限制](docs/implementation-review.md)。
+TLS 1.3 保护客户端到服务的传输；HMAC 签名只校验来源和完整性，不会加密落库的请求正文，也不覆盖服务到下游机构的传输。服务到下游使用 HTTPS 时会校验对方证书。三次上限针对 HTTP 业务尝试，Go Transport 在部分连接故障下可能内部重试；快速失败开关也不会撤销已经在途的请求，配置读取与发送之间存在竞态。发送时目标复核、迁移中断恢复、异常日志与锁等待预算等问题详见[已知限制](docs/implementation-review.md)。

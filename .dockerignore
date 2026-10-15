@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+.local-certs
 reports
 data
 .tmp_pdf_review

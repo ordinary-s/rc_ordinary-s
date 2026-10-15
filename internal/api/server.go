@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -11,11 +12,13 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ordinary-s/rc_ordinary-s/internal/config"
 	"github.com/ordinary-s/rc_ordinary-s/internal/domain"
 	"github.com/ordinary-s/rc_ordinary-s/internal/notification"
+	"github.com/ordinary-s/rc_ordinary-s/internal/signature"
 	"github.com/ordinary-s/rc_ordinary-s/internal/store"
 )
 
@@ -25,10 +28,18 @@ type Server struct {
 	notifications *notification.Service
 	logger        *slog.Logger
 	mqReady       func(context.Context) error
+	signatureKeys map[string][]byte
+	nonceCounter  atomic.Uint64
 }
 
 func New(cfg config.Config, s *store.Store, notifications *notification.Service, logger *slog.Logger, mqReady func(context.Context) error) *Server {
-	return &Server{cfg: cfg, store: s, notifications: notifications, logger: logger, mqReady: mqReady}
+	return &Server{
+		cfg: cfg, store: s, notifications: notifications, logger: logger, mqReady: mqReady,
+		signatureKeys: map[string][]byte{
+			cfg.ClientSignatureKeyID: cfg.ClientSignatureKey,
+			cfg.AdminSignatureKeyID:  cfg.AdminSignatureKey,
+		},
+	}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -40,7 +51,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/notifications", s.listNotifications)
 	mux.HandleFunc("PATCH /api/v1/admin/destinations/{id}/fast-fail", s.setFastFail)
 	mux.HandleFunc("POST /api/v1/admin/notifications/{id}/resolve", s.resolveNotification)
-	return s.requestLimits(mux)
+	return s.requestLimits(s.requireSignature(mux))
 }
 
 func (s *Server) requestLimits(next http.Handler) http.Handler {
@@ -51,9 +62,55 @@ func (s *Server) requestLimits(next http.Handler) http.Handler {
 			writeError(w, http.StatusRequestEntityTooLarge, "request too large")
 			return
 		}
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxBodyBytes+int64(s.cfg.MaxHeaderBytes)+32*1024)
+		}
 		next.ServeHTTP(w, r)
 	})
 }
+
+func (s *Server) requireSignature(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.Body != nil {
+			body, err := io.ReadAll(r.Body)
+			_ = r.Body.Close()
+			if err != nil {
+				writeError(w, http.StatusRequestEntityTooLarge, "request too large")
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
+		}
+		claims, err := signature.VerifyRequest(r, s.signatureKeys, time.Now())
+		if err != nil {
+			writeError(w, http.StatusUnauthorized, "valid request signature required")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := s.store.UseSignatureNonce(ctx, claims.KeyID, claims.Nonce, claims.Expires); err != nil {
+			if errors.Is(err, store.ErrSignatureReplay) {
+				writeError(w, http.StatusUnauthorized, "request signature was already used")
+				return
+			}
+			s.logger.Error("signature nonce persistence failed", "code", "SIGNATURE_NONCE_STORE_FAILED", "error_type", fmt.Sprintf("%T", err))
+			writeError(w, http.StatusServiceUnavailable, "request verification is temporarily unavailable")
+			return
+		}
+		if s.nonceCounter.Add(1)%256 == 0 {
+			if err := s.store.DeleteExpiredSignatureNonces(ctx); err != nil {
+				s.logger.Warn("expired signature nonce cleanup failed", "error_type", fmt.Sprintf("%T", err))
+			}
+		}
+		r = r.WithContext(context.WithValue(r.Context(), signatureKeyIDContextKey{}, claims.KeyID))
+		next.ServeHTTP(w, r)
+	})
+}
+
+type signatureKeyIDContextKey struct{}
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "live"})
@@ -245,6 +302,10 @@ func (s *Server) resolveNotification(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) authenticateClient(r *http.Request) (string, bool) {
+	keyID, ok := r.Context().Value(signatureKeyIDContextKey{}).(string)
+	if !ok || keyID != s.cfg.ClientSignatureKeyID {
+		return "", false
+	}
 	token := bearer(r)
 	if len(token) != len(s.cfg.ClientToken) || subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.ClientToken)) != 1 {
 		return "", false
@@ -253,6 +314,10 @@ func (s *Server) authenticateClient(r *http.Request) (string, bool) {
 }
 
 func (s *Server) authenticateAdmin(r *http.Request) (string, bool) {
+	keyID, ok := r.Context().Value(signatureKeyIDContextKey{}).(string)
+	if !ok || keyID != s.cfg.AdminSignatureKeyID {
+		return "", false
+	}
 	token := bearer(r)
 	if len(token) != len(s.cfg.AdminToken) || subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.AdminToken)) != 1 {
 		return "", false

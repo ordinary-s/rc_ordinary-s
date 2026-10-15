@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strconv"
@@ -9,60 +10,76 @@ import (
 )
 
 type Config struct {
-	HTTPAddr            string
-	DBDSN               string
-	NameServer          string
-	BrokerAddress       string
-	Topic               string
-	ProducerGroup       string
-	ConsumerGroup       string
-	ClientID            string
-	ClientToken         string
-	AdminToken          string
-	AdminActor          string
-	DestinationID       string
-	DestinationURL      string
-	AllowedTarget       string
-	ConsumerConcurrency int
-	MaxReconsume        int32
-	HTTPTimeout         time.Duration
-	DeliveryBudget      time.Duration
-	MQConsumeTimeout    time.Duration
-	TaskTTL             time.Duration
-	Backoffs            []time.Duration
-	OutboxPoll          time.Duration
-	MaxBodyBytes        int64
-	MaxHeaderBytes      int
+	HTTPSAddr            string
+	TLSCertFile          string
+	TLSKeyFile           string
+	DBDSN                string
+	NameServer           string
+	BrokerAddress        string
+	Topic                string
+	ProducerGroup        string
+	ConsumerGroup        string
+	ClientID             string
+	ClientToken          string
+	AdminToken           string
+	AdminActor           string
+	ClientSignatureKeyID string
+	ClientSignatureKey   []byte
+	AdminSignatureKeyID  string
+	AdminSignatureKey    []byte
+	DestinationID        string
+	DestinationURL       string
+	AllowedTarget        string
+	ConsumerConcurrency  int
+	MaxReconsume         int32
+	HTTPTimeout          time.Duration
+	DeliveryBudget       time.Duration
+	MQConsumeTimeout     time.Duration
+	TaskTTL              time.Duration
+	Backoffs             []time.Duration
+	OutboxPoll           time.Duration
+	MaxBodyBytes         int64
+	MaxHeaderBytes       int
 }
 
 func Load() (Config, error) {
 	c := Config{
-		HTTPAddr:            env("HTTP_ADDR", ":8080"),
-		DBDSN:               env("DB_DSN", "notification_app:notification-app-local@tcp(mysql:3306)/notifications?parseTime=true&loc=UTC&charset=utf8mb4"),
-		NameServer:          env("ROCKETMQ_NAMESRV", "namesrv:9876"),
-		BrokerAddress:       env("ROCKETMQ_BROKER_ADDR", "broker:10911"),
-		Topic:               env("ROCKETMQ_TOPIC", "notification_delivery"),
-		ProducerGroup:       env("ROCKETMQ_PRODUCER_GROUP", "notification_outbox_publisher"),
-		ConsumerGroup:       env("ROCKETMQ_CONSUMER_GROUP", "notification_delivery_workers"),
-		ClientID:            env("CLIENT_ID", "demo-client"),
-		ClientToken:         env("CLIENT_TOKEN", "demo-client-token"),
-		AdminToken:          env("ADMIN_TOKEN", "demo-admin-token"),
-		AdminActor:          env("ADMIN_ACTOR", "local-admin"),
-		DestinationID:       env("DESTINATION_ID", "mock-target"),
-		DestinationURL:      env("DESTINATION_URL", "http://mock-target:8090/notify"),
-		AllowedTarget:       env("ALLOWED_TARGET", "http://mock-target:8090"),
-		ConsumerConcurrency: 4,
-		MaxReconsume:        8,
-		HTTPTimeout:         10 * time.Second,
-		DeliveryBudget:      90 * time.Second,
-		MQConsumeTimeout:    2 * time.Minute,
-		TaskTTL:             30 * time.Minute,
-		Backoffs:            []time.Duration{10 * time.Second, 20 * time.Second},
-		OutboxPoll:          time.Second,
-		MaxBodyBytes:        256 * 1024,
-		MaxHeaderBytes:      16 * 1024,
+		HTTPSAddr:            env("HTTPS_ADDR", ":8443"),
+		TLSCertFile:          env("TLS_CERT_FILE", "/certs/server.crt"),
+		TLSKeyFile:           env("TLS_KEY_FILE", "/certs/server.key"),
+		DBDSN:                env("DB_DSN", "notification_app:notification-app-local@tcp(mysql:3306)/notifications?parseTime=true&loc=UTC&charset=utf8mb4"),
+		NameServer:           env("ROCKETMQ_NAMESRV", "namesrv:9876"),
+		BrokerAddress:        env("ROCKETMQ_BROKER_ADDR", "broker:10911"),
+		Topic:                env("ROCKETMQ_TOPIC", "notification_delivery"),
+		ProducerGroup:        env("ROCKETMQ_PRODUCER_GROUP", "notification_outbox_publisher"),
+		ConsumerGroup:        env("ROCKETMQ_CONSUMER_GROUP", "notification_delivery_workers"),
+		ClientID:             env("CLIENT_ID", "demo-client"),
+		ClientToken:          env("CLIENT_TOKEN", "demo-client-token"),
+		AdminToken:           env("ADMIN_TOKEN", "demo-admin-token"),
+		AdminActor:           env("ADMIN_ACTOR", "local-admin"),
+		ClientSignatureKeyID: env("CLIENT_SIGNATURE_KEY_ID", "demo-client-v1"),
+		AdminSignatureKeyID:  env("ADMIN_SIGNATURE_KEY_ID", "demo-admin-v1"),
+		DestinationID:        env("DESTINATION_ID", "mock-target"),
+		DestinationURL:       env("DESTINATION_URL", "http://mock-target:8090/notify"),
+		AllowedTarget:        env("ALLOWED_TARGET", "http://mock-target:8090"),
+		ConsumerConcurrency:  4,
+		MaxReconsume:         8,
+		HTTPTimeout:          10 * time.Second,
+		DeliveryBudget:       90 * time.Second,
+		MQConsumeTimeout:     2 * time.Minute,
+		TaskTTL:              30 * time.Minute,
+		Backoffs:             []time.Duration{10 * time.Second, 20 * time.Second},
+		OutboxPoll:           time.Second,
+		MaxBodyBytes:         256 * 1024,
+		MaxHeaderBytes:       16 * 1024,
 	}
 	var err error
+	if c.ClientSignatureKey, err = secretEnv("CLIENT_SIGNATURE_SECRET_HEX", "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"); err != nil {
+		return Config{}, err
+	}
+	if c.AdminSignatureKey, err = secretEnv("ADMIN_SIGNATURE_SECRET_HEX", "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100"); err != nil {
+		return Config{}, err
+	}
 	if c.ConsumerConcurrency, err = intEnv("CONSUMER_CONCURRENCY", c.ConsumerConcurrency); err != nil {
 		return Config{}, err
 	}
@@ -114,10 +131,28 @@ func Load() (Config, error) {
 	if strings.TrimSpace(c.ClientToken) == "" || strings.TrimSpace(c.AdminToken) == "" || strings.TrimSpace(c.AdminActor) == "" {
 		return Config{}, fmt.Errorf("client token, admin token, and admin actor must be configured")
 	}
+	if !validActor(c.ClientSignatureKeyID) || !validActor(c.AdminSignatureKeyID) || c.ClientSignatureKeyID == c.AdminSignatureKeyID {
+		return Config{}, fmt.Errorf("signature key IDs must be distinct 1-64 character identifiers")
+	}
+	if c.HTTPSAddr == "" || c.TLSCertFile == "" || c.TLSKeyFile == "" {
+		return Config{}, fmt.Errorf("HTTPS_ADDR, TLS_CERT_FILE, and TLS_KEY_FILE must be configured")
+	}
 	if !validActor(c.AdminActor) {
 		return Config{}, fmt.Errorf("ADMIN_ACTOR must be 1-64 letters, digits, dots, underscores, or hyphens")
 	}
 	return c, nil
+}
+
+func secretEnv(key, fallback string) ([]byte, error) {
+	value := env(key, fallback)
+	secret, err := hex.DecodeString(value)
+	if err != nil {
+		return nil, fmt.Errorf("%s must be hexadecimal", key)
+	}
+	if len(secret) < 32 {
+		return nil, fmt.Errorf("%s must contain at least 32 bytes", key)
+	}
+	return secret, nil
 }
 
 func validActor(actor string) bool {

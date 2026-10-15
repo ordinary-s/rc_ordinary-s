@@ -1,0 +1,229 @@
+{
+  "scenarios": [
+    {
+      "details": {
+        "authorization_tampering_rejected": true,
+        "body_tampering_rejected": true,
+        "client_signature_on_admin_route_rejected": true,
+        "expired_signature_rejected": true,
+        "negotiated_tls": "1.3",
+        "nonce_replay_rejected": true,
+        "tls12_only_rejected": true,
+        "unsigned_rejected": true
+      },
+      "name": "tls13_and_hmac_signature",
+      "passed": true
+    },
+    {
+      "details": {
+        "after_duplicate": 1,
+        "mock_calls": 1,
+        "notifications": 1,
+        "outbox_state": "PUBLISHED",
+        "outboxes": 1,
+        "task_id": "192742f4-d75e-490e-973c-605c7da34315"
+      },
+      "name": "acceptance_transaction_and_idempotency",
+      "passed": true
+    },
+    {
+      "details": {
+        "due_at": "2026-10-15T07:45:44.014124Z",
+        "http_attempts": 2,
+        "mock_calls": 2,
+        "result": "DELIVERED",
+        "task_id": "1ee46346-1684-4460-8609-389601a79b76"
+      },
+      "name": "persisted_retry_due_survives_context_cancellation",
+      "passed": true
+    },
+    {
+      "details": {
+        "audit_actor": "integration-test",
+        "first_http_status": 500,
+        "recovered_http_status": 200,
+        "task_id": "da294d25-4fb4-4265-ab00-e8265004e89a"
+      },
+      "name": "resolution_database_failure_maps_to_500_then_recovers",
+      "passed": true
+    },
+    {
+      "details": {
+        "http_attempts": 1,
+        "local_mark_failures": 2,
+        "mark_retry_interval_ms": 1098,
+        "mock_calls_after_duplicate_window": 1,
+        "outbox_state_after_recovery": "PUBLISHED",
+        "task_id": "865c6ce2-08a6-4270-8d13-9a4d732e37f2"
+      },
+      "name": "outbox_send_mark_failure_duplicate_safe",
+      "passed": true
+    },
+    {
+      "details": {
+        "case_distinct": true,
+        "concurrent_task_id": "99bb521c-a8e3-48cb-9a7b-90105314e36d",
+        "notification_rows": 1,
+        "outbox_rows": 1
+      },
+      "name": "case_sensitive_and_parallel_idempotency",
+      "passed": true
+    },
+    {
+      "details": {
+        "configured_consumer_concurrency": 4,
+        "max_in_flight": 4,
+        "mock_calls": 8,
+        "tasks": [
+          {
+            "task_id": "3797c0e7-eda1-4efa-8c09-b062098b4c01",
+            "trace_id": "5641212a-214e-46a9-95cb-660b6d563b2f"
+          },
+          {
+            "task_id": "11be65a6-04e7-4a81-8a24-2864e6f24b9b",
+            "trace_id": "93d4d24c-f31e-4b77-aea5-224ee3ce52b3"
+          },
+          {
+            "task_id": "4777c865-651f-47c8-aceb-d7f5b3fd8d78",
+            "trace_id": "0dd57f56-900d-481f-baab-98007ea2fd99"
+          },
+          {
+            "task_id": "79344d96-ee35-4f92-a97d-934d21f3e329",
+            "trace_id": "1b367d76-b895-490d-ae4f-6ed761a55949"
+          },
+          {
+            "task_id": "85aca064-daa0-4f22-8726-c410bdf57da8",
+            "trace_id": "466387d3-d90b-48c3-bbf6-49f26bfe7acd"
+          },
+          {
+            "task_id": "921401f4-2937-42db-98a6-665267aebe1c",
+            "trace_id": "f866d480-1739-4644-94ae-de7d0a5e8f6f"
+          },
+          {
+            "task_id": "c38341ad-658c-437d-88c6-c5af15ef60e7",
+            "trace_id": "44df9a36-7ca5-4ffd-8cba-a493bf0e1c1f"
+          },
+          {
+            "task_id": "bcba74f8-5930-46a5-8bdc-ab2fc50cf9a2",
+            "trace_id": "71ed400f-4293-42fb-9d03-342e0c3b5982"
+          }
+        ]
+      },
+      "name": "concurrent_tasks_keep_trace_and_task_context_paired",
+      "passed": true
+    },
+    {
+      "details": {
+        "attempts": 2,
+        "elapsed_ms": 178,
+        "mock_calls": 2,
+        "task_id": "a8cd5b01-d71b-41d5-9264-f652dfe22253"
+      },
+      "name": "http_503_then_success",
+      "passed": true
+    },
+    {
+      "details": {
+        "after_duplicate": 3,
+        "attempts": 3,
+        "elapsed_ms": 456,
+        "mock_calls": 3,
+        "task_id": "4c757584-aa92-4faa-b2b0-5998cc289d8c"
+      },
+      "name": "three_503_terminal_duplicate_delivery",
+      "passed": true
+    },
+    {
+      "details": {
+        "new_task": "2c0bb382-a766-48d5-a73e-ce5d540fc02e",
+        "old_calls_after_recovery": 0,
+        "old_task": "9010aca5-cb08-4acc-a8a5-af812c8f052e"
+      },
+      "name": "fast_fail_terminal_manual_recovery",
+      "passed": true
+    },
+    {
+      "details": {
+        "content_type": "application/xml; charset=utf-8",
+        "task_id": "8750ec20-5b92-408f-9e6e-1d198c45040e"
+      },
+      "name": "raw_body_0",
+      "passed": true
+    },
+    {
+      "details": {
+        "content_type": "application/x-www-form-urlencoded",
+        "task_id": "c5d04944-5031-4d2f-9be4-34898fd2656d"
+      },
+      "name": "raw_body_1",
+      "passed": true
+    },
+    {
+      "details": {
+        "plan": {
+          "Extra": "Using index condition",
+          "filtered": 100,
+          "id": 1,
+          "key": "idx_outbox_pending_due",
+          "key_len": "26",
+          "partitions": null,
+          "possible_keys": "idx_outbox_pending_due",
+          "ref": null,
+          "rows": 1,
+          "select_type": "SIMPLE",
+          "table": "outbox",
+          "type": "range"
+        },
+        "runner_timezone": "+00:00"
+      },
+      "name": "outbox_explain_utc",
+      "passed": true
+    },
+    {
+      "details": {
+        "http_attempts": 1,
+        "mock_calls": 1,
+        "mq_reconsume": 1,
+        "outbox_state": "PUBLISHED",
+        "task_id": "38207162-9be0-48c9-bfe7-42a75bd2eaa0"
+      },
+      "name": "database_exception_native_redelivery",
+      "passed": true
+    },
+    {
+      "details": {
+        "attempt_state": "SUCCEEDED",
+        "elapsed_ms": 291,
+        "http_attempts": 1,
+        "mock_calls": 1,
+        "result": "DELIVERED",
+        "result_write_attempts": 3,
+        "task_id": "4183312b-437b-44c2-85ef-f5ee9f0758e7"
+      },
+      "name": "external_success_result_write_retried_without_repeating_http",
+      "passed": true
+    },
+    {
+      "details": {
+        "attempt_state": "UNKNOWN",
+        "http_attempts": 1,
+        "mock_calls_after_duplicate_window": 1,
+        "mq_reconsume": 1,
+        "result": "UNCERTAIN",
+        "result_write_attempts": 3,
+        "task_id": "d825399d-903f-410a-918b-e05c0d17f389"
+      },
+      "name": "external_success_result_write_exhaustion_no_http_repeat",
+      "passed": true
+    },
+    {
+      "details": {
+        "msg_id": "AC1F000744C80000000049c3e9400003",
+        "reconsume_times": 3,
+        "topic": "%DLQ%notification_delivery_workers"
+      },
+      "name": "rocketmq_native_retries_reach_dlq",
+      "passed": true
+    }
+  ]
+}

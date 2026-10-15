@@ -34,6 +34,14 @@ RocketMQ 将原生重试耗尽的消息放入 DLQ，但这个动作不会同步�
 
 ## 2. 安全与运维
 
+### TLS 与 HMAC 的安全边界
+
+服务端目前最低接受 TLS 1.3；`/api/*` 在 Bearer 身份之外还校验 RFC 9421 HMAC 签名、内容摘要、时间窗和 MySQL nonce。真实 Docker E2E 应验证 TLS1.3 协商、TLS1.2 拒绝、无签名/篡改/过期/重放拒绝。
+
+Compose 自签名 CA 和 key 仅用于本地演示。部署需提供可信证书、分别保存 client/admin HMAC 密钥并制定轮换流程；当前没有自动轮换平台或每客户端独立凭证库。HMAC 只校验来源与完整性，不保密；Body 仍以原始文本写入 MySQL 和备份。可由可信网关终止 TLS，但当前签名校验根据应用收到的请求 URI 计算，没有可信代理头支持，必须限制应用网络入口，且不能直接信任任意 `Forwarded` 头。
+
+源码入口：[TLS server](../cmd/server/main.go)、[签名策略](../internal/signature/signature.go)、[nonce 表](../migrations/003_api_signature_nonce.sql)、[Compose 演示证书](../cmd/devcert/main.go)。验收结果及当前运行 ID见[测试报告](verification.md)。
+
 ### R04：日志关联已实现，但不是每条日志字段齐全、所有错误均已白名单化
 
 任务的 trace 会写入数据库并随异步事件传递，消费日志通过局部参数传入关联字段，没有共享可变的请求日志状态。归档测试中的并发 task/trace 配对和敏感信息扫描均通过。

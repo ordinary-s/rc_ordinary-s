@@ -12,9 +12,10 @@ import (
 )
 
 var (
-	ErrNotFound    = errors.New("not found")
-	ErrConflict    = errors.New("idempotency conflict")
-	ErrNotEligible = errors.New("notification is not eligible for manual resolution")
+	ErrNotFound        = errors.New("not found")
+	ErrConflict        = errors.New("idempotency conflict")
+	ErrNotEligible     = errors.New("notification is not eligible for manual resolution")
+	ErrSignatureReplay = errors.New("signature nonce was already used")
 )
 
 type Store struct {
@@ -40,6 +41,27 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
+
+// UseSignatureNonce atomically reserves a verified request nonce until expiry.
+func (s *Store) UseSignatureNonce(ctx context.Context, keyID, nonce string, expiresAt time.Time) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO api_signature_nonce (key_id, nonce, expires_at) VALUES (?, ?, ?)`, keyID, nonce, expiresAt.UTC())
+	if err == nil {
+		return nil
+	}
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 {
+		return ErrSignatureReplay
+	}
+	return fmt.Errorf("reserve signature nonce: %w", err)
+}
+
+// DeleteExpiredSignatureNonces performs a bounded cleanup using the expiry index.
+func (s *Store) DeleteExpiredSignatureNonces(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM api_signature_nonce WHERE expires_at <= UTC_TIMESTAMP(6) ORDER BY expires_at LIMIT 1000`); err != nil {
+		return fmt.Errorf("delete expired signature nonces: %w", err)
+	}
+	return nil
+}
 
 func (s *Store) GetDestination(ctx context.Context, id string) (domain.Destination, error) {
 	var d domain.Destination

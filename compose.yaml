@@ -69,6 +69,17 @@ services:
     logging:
       driver: json-file
       options: {max-size: 10m, max-file: "3"}
+  cert-init:
+    image: ${CERT_IMAGE:-rc-notification-cert-init:0.1.0}
+    build: {context: ., target: cert-init}
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["/app/devcert && chown -R 65532:65532 /certs && chmod 600 /certs/server.key && chmod 644 /certs/ca.crt /certs/server.crt"]
+    volumes:
+      - tls-certs:/certs
+    restart: "no"
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "2"}
   mq-init:
     image: apache/rocketmq:5.5.0@sha256:7e8f6c9dbd9df742ed26ba69c00d4ad69e2f86a56f3ca7782ff8144dd0798132
     entrypoint: ["sh", "/scripts/init-rocketmq.sh"]
@@ -118,7 +129,10 @@ services:
     image: ${APP_IMAGE:-rc-notification:0.1.0}
     build: {context: ., target: runtime}
     environment:
-      HTTP_ADDR: :8080
+      HTTPS_ADDR: :8443
+      TLS_CERT_FILE: /certs/server.crt
+      TLS_KEY_FILE: /certs/server.key
+      HEALTHCHECK_CA_FILE: /certs/ca.crt
       DB_DSN: "notification_app:${MYSQL_APP_PASSWORD:-notification-app-local}@tcp(mysql:3306)/notifications?parseTime=true&loc=UTC&charset=utf8mb4"
       ROCKETMQ_NAMESRV: namesrv:9876
       ROCKETMQ_BROKER_ADDR: broker:10911
@@ -131,6 +145,10 @@ services:
       CLIENT_TOKEN: ${CLIENT_TOKEN:-demo-client-token}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-demo-admin-token}
       ADMIN_ACTOR: ${ADMIN_ACTOR:-local-admin}
+      CLIENT_SIGNATURE_KEY_ID: ${CLIENT_SIGNATURE_KEY_ID:-demo-client-v1}
+      CLIENT_SIGNATURE_SECRET_HEX: ${CLIENT_SIGNATURE_SECRET_HEX:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f}
+      ADMIN_SIGNATURE_KEY_ID: ${ADMIN_SIGNATURE_KEY_ID:-demo-admin-v1}
+      ADMIN_SIGNATURE_SECRET_HEX: ${ADMIN_SIGNATURE_SECRET_HEX:-1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100}
       DELIVERY_BUDGET: ${DELIVERY_BUDGET:-90s}
       MQ_CONSUME_TIMEOUT: ${MQ_CONSUME_TIMEOUT:-2m}
       DESTINATION_ID: mock-target
@@ -142,7 +160,9 @@ services:
       TASK_TTL: 30m
       OUTBOX_POLL: 1s
     ports:
-      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8080}:8080"
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8443}:8443"
+    volumes:
+      - tls-certs:/certs:ro
     depends_on:
       mysql:
         condition: service_healthy
@@ -154,8 +174,10 @@ services:
         condition: service_completed_successfully
       mq-init:
         condition: service_completed_successfully
+      cert-init:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "/app/healthcheck", "http://localhost:8080/readyz"]
+      test: ["CMD", "/app/healthcheck", "https://localhost:8443/readyz"]
       interval: 3s
       timeout: 3s
       retries: 20
@@ -169,10 +191,15 @@ services:
     build: {context: ., target: test-runner}
     profiles: ["verify"]
     environment:
-      TEST_API_URL: http://app:8080
+      TEST_API_URL: https://app:8443
       TEST_CLIENT_TOKEN: ${CLIENT_TOKEN:-demo-client-token}
       TEST_ADMIN_TOKEN: ${ADMIN_TOKEN:-demo-admin-token}
       TEST_ADMIN_ACTOR: ${ADMIN_ACTOR:-local-admin}
+      TEST_CLIENT_SIGNATURE_KEY_ID: ${CLIENT_SIGNATURE_KEY_ID:-demo-client-v1}
+      TEST_CLIENT_SIGNATURE_SECRET_HEX: ${CLIENT_SIGNATURE_SECRET_HEX:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f}
+      TEST_ADMIN_SIGNATURE_KEY_ID: ${ADMIN_SIGNATURE_KEY_ID:-demo-admin-v1}
+      TEST_ADMIN_SIGNATURE_SECRET_HEX: ${ADMIN_SIGNATURE_SECRET_HEX:-1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100}
+      TEST_TLS_CA_FILE: /certs/ca.crt
       TEST_DB_DSN: "root:${MYSQL_ROOT_PASSWORD:-notification-root-local}@tcp(mysql:3306)/notifications?parseTime=true&loc=UTC&charset=utf8mb4"
       TEST_MOCK_URL: http://mock-target:8090
       ROCKETMQ_NAMESRV: namesrv:9876
@@ -181,6 +208,7 @@ services:
       TEST_CONTROL_DIR: /reports
     volumes:
       - ./reports/${VERIFY_RUN_ID:-local}:/reports
+      - tls-certs:/certs:ro
     depends_on:
       app:
         condition: service_healthy
@@ -191,3 +219,4 @@ services:
 volumes:
   mysql-data:
   rocketmq-data:
+  tls-certs:

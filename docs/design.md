@@ -18,7 +18,7 @@ MVP 将 API、Outbox 发布器和消费者放在一个 Go 进程。模块职责�
 | 发布补偿、异步分发、有限 HTTP 尝试和可查询结果 | 任意故障下最终必达；次数耗尽、过期和快速失败都可能不送达 |
 | 重复消息识别、已用次数持久化、结果不明时停止自动发送 | 外部副作用恰好一次；本地唯一键不能代替供应商去重 |
 | 机构人工快速失败、失败结论记录、原生 DLQ 排查 | 自动熔断、自动恢复、终态自动重放、审批平台；它们改变故障与预算边界 |
-| 原始 UTF-8 文本请求，包括 JSON、XML、表单和纯文本 | 二进制/multipart 大文件、通用供应商适配、动态签名和 OAuth 自动刷新 |
+| 原始 UTF-8 文本请求，包括 JSON、XML、表单和纯文本；客户端 API 使用 TLS 1.3 和 HMAC 请求签名 | 二进制/multipart 大文件、任意供应商签名、OAuth 自动刷新 |
 | 单实例有界消费、连接复用、轻量日志和真实依赖验收 | 严格业务顺序、多实例全局配额、跨机房容灾和未经压测的吞吐承诺 |
 
 当前身份配置只映射一个客户端 token 到一个 `CLIENT_ID`，一个管理员 token 到一个 `ADMIN_ACTOR`。查询有调用方隔离条件，但没有多租户身份管理和按调用方分配机构权限的平台。原始请求可能含敏感信息，持久化存储及备份须受控。
@@ -40,7 +40,7 @@ MVP 将 API、Outbox 发布器和消费者放在一个 Go 进程。模块职责�
 上游业务方
     |
     v
-API：Bearer -> 客户端身份 -> 输入/目标校验 -> Idempotency-Key
+API：TLS 1.3 -> RFC 9421 HMAC/nonce 校验 -> Bearer 与签名角色校验 -> 输入/目标校验 -> Idempotency-Key
     |
     v
 T1 本地事务：notification(PENDING, 次数0) + outbox(PENDING)
@@ -91,7 +91,9 @@ Go Publisher：扫描到期的 PENDING Outbox，每批最多100条
 
 `POST /api/v1/notifications` 接收 JSON 信封：`destination_id`、`method`、`headers`、`body`。body 是原始文本字符串，解码后按原字节发送，不重新解析其中 JSON/XML/表单。允许 GET、POST、PUT、PATCH、DELETE、HEAD、OPTIONS。方法统一大写、Header 名规范化并拒绝规范化后的重名；禁止调用方控制 Host、Content-Length、Connection 等传输头。
 
-客户端身份来自 Bearer 配置，不能在请求体中自报。`Idempotency-Key` 必填、TrimSpace 后最多 128 字节。数据库使用 `(client_id, idempotency_key)` 非空唯一约束和大小写敏感排序规则，避免“先查询再插入”的竞争。`request_fingerprint` 是目标 ID、规范化方法/Header 和解码后 Body 的 SHA-256，trace 不参与。Body 内空白仍影响指纹，系统不判断两份文本是否具有相同业务含义。
+客户端身份来自 Bearer 配置，不能在请求体中自报。除 `/healthz`、`/readyz` 外，所有 `/api/*` 路由都要求 TLS 1.3、Bearer token 和 RFC 9421 `hmac-sha256` 签名。签名覆盖 `@method`、`@authority`、`@target-uri`、`@path`、`authorization` 和 RFC 9530 `content-digest`；通知提交额外覆盖 `idempotency-key`。签名时间窗最长 5 分钟，允许 30 秒时钟偏差，要求一次性随机 nonce；nonce 以 `(key_id, nonce)` 唯一键存 MySQL，按过期时间清理。客户端与管理员密钥 ID 和密钥不同，校验通过后再按 key ID 限制路由角色。Bearer token、HMAC key 和有效 TLS 证书要分别管理。
+
+`Idempotency-Key` 必填、TrimSpace 后最多 128 字节。数据库使用 `(client_id, idempotency_key)` 非空唯一约束和大小写敏感排序规则，避免“先查询再插入”的竞争。`request_fingerprint` 是目标 ID、规范化方法/Header 和解码后 Body 的 SHA-256，trace 不参与。Body 内空白仍影响指纹，系统不判断两份文本是否具有相同业务含义。
 
 同键同内容返回原任务及原 trace，仍为 202，`created=false`；同键异内容返回 409。响应丢失后重提不会新建任务或 Outbox。指纹只包含 destination_id，不包含数据库中的实际目标 URL，因此目标配置变化不产生新的入口幂等身份。
 
@@ -212,7 +214,7 @@ UNCERTAIN 表示投递结果不明。人工核对结论以自由文本保存在�
 
 表为 InnoDB，表列小写 snake_case，明确 utf8mb4/排序规则；task_id、event_id、trace_id 等 ASCII 字段用 ascii_bin，client_id、destination_id、幂等键用 utf8mb4_0900_bin。时间是 UTC DATETIME(6)，写 UTC_TIMESTAMP(6)，Go DSN 用 parseTime/UTC。SQL 参数化、短事务，列表有客户端/状态/时间索引。
 
-迁移见 [001](../migrations/001_initial.sql) 和 [002](../migrations/002_notification_retry_due.sql)。MySQL [DDL 隐式提交](https://dev.mysql.com/doc/refman/8.4/en/implicit-commit.html)，不能假设回滚整批迁移。002 的 ALTER 成功、登记失败后，重跑会重复加列；须核对 information_schema 中类型、精度、可空性和位置，对照 SQL/schema_migrations。仅在 schema 完全符合预期时补登记版本；否则先制定修复方案，不能盲目跳过或删列。新库验收不覆盖该中断窗口。
+迁移见 [001](../migrations/001_initial.sql)、[002](../migrations/002_notification_retry_due.sql) 和 [003](../migrations/003_api_signature_nonce.sql)。MySQL [DDL 隐式提交](https://dev.mysql.com/doc/refman/8.4/en/implicit-commit.html)，不能假设回滚整批迁移。002 的 ALTER 成功、登记失败后，重跑会重复加列；须核对 information_schema 中类型、精度、可空性和位置，对照 SQL/schema_migrations。仅在 schema 完全符合预期时补登记版本；否则先制定修复方案，不能盲目跳过或删列。新库验收不覆盖该中断窗口。
 
 ## 12. HTTP 错误分类与结果不明
 
@@ -252,9 +254,11 @@ DLQ 是消费执行异常耗尽，任务可能仍为 PENDING/PROCESSING；普通
 
 ## 15. 安全、并发与资源控制
 
+API 服务通过 `ListenAndServeTLS` 仅接受 TLS 1.3 或更高版本；本地 Compose 使用命名卷内的演示 CA/证书，`dev-up.ps1` 导出 CA 到 Git 忽略的 `.local-certs/ca.crt`。这不适合作为生产证书。生产可由受控 HTTPS 网关终止 TLS，但必须限制应用只能接收来自该网关的流量；若网关改变外部 URI，当前签名验证需增加只信任该网关的原始 URI 传递方案，不能直接信任任意 `Forwarded` 头。MVP 没有应用层 Body 加密：TLS 只保护传输，HMAC 只验证签名/完整性，数据库中的请求仍是明文业务数据，应依靠数据库权限、存储加密与备份访问控制保护。
+
 目标由 migration seed 配置，入口按 ALLOWED_TARGET 校验协议、主机、端口；调用方不能提供任意 URL。禁自动重定向和环境代理，保留 TLS 校验。当前防护依赖受信任的目标配置：执行时重读 destination，却没有重新校验 allowlist，也没有检查 DNS 解析后的地址范围。因此，受理后目标被修改和 DNS 地址变化仍是 SSRF 防护缺口。
 
-Body 最大 256 KiB，业务 Header 最多 64 个、合计 16 KiB；JSON 信封另有传输读取限制，接近上限且大量转义的文本未必能受理。管理员输入有大小限制；API 不返回原请求。运行 DB 用户为 DML 权限，迁移用独立初始化身份。没有应用层加密、凭证轮换平台或数据自动清理。
+Body 最大 256 KiB，业务 Header 最多 64 个、合计 16 KiB；签名输入在验证前有界读取，JSON 信封另有传输读取限制，接近上限且大量转义的文本未必能受理。管理员输入有大小限制；API 不返回原请求。nonce 表由迁移 003 建立，过期记录每 256 个成功验签请求触发一次清理；低流量实例中的过期 nonce 可保留到后续流量触发清理。运行 DB 用户为 DML 权限，迁移用独立初始化身份。没有应用层字段/Body 加密、自动密钥轮换平台或业务数据自动清理。
 
 资源上限有消费并发默认 4、单主机连接 16、空闲连接总数 64/每主机 8、DB 连接池 24/空闲 8，以及 Compose 内存/日志限制；当前没有显式 CPU 配额。HTTP 拨号 3s、TLS 握手 5s，每次总超时/处理预算有界。pull/batch=1 不等于 SDK 只缓存一条消息，尚未专门压测总缓存。
 

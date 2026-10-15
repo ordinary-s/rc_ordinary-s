@@ -13,6 +13,7 @@ $composeTouched = $false
 $outageRunnerId = ''
 $env:APP_IMAGE = 'rc-notification:0.1.0'
 $env:TEST_IMAGE = 'rc-notification-test:0.1.0'
+$env:CERT_IMAGE = 'rc-notification-cert-init:0.1.0'
 $env:ADMIN_ACTOR = 'integration-test'
 $env:DELIVERY_BUDGET = '90s'
 $env:MQ_CONSUME_TIMEOUT = '2m'
@@ -47,6 +48,7 @@ try {
     Invoke-DockerStep 'compose config --quiet' (@('compose') + $composeArgs + @('config','--quiet'))
     Invoke-DockerStep 'build application image' @('build','--pull','--target','runtime','--tag',$env:APP_IMAGE,(Join-Path $root '.'))
     Invoke-DockerStep 'build test-runner image' @('build','--pull','--target','test-runner','--tag',$env:TEST_IMAGE,(Join-Path $root '.'))
+    Invoke-DockerStep 'build local certificate initializer image' @('build','--pull','--target','cert-init','--tag',$env:CERT_IMAGE,(Join-Path $root '.'))
     $composeTouched = $true
     Invoke-DockerStep 'start isolated stack' (@('compose') + $composeArgs + @('up','-d','app'))
     $deadline = [DateTime]::UtcNow.AddMinutes(5)
@@ -199,23 +201,30 @@ finally {
                 'log_secret_scan=PASS' | Add-Content -LiteralPath $summary -Encoding utf8
             }
             $contextFile = Join-Path $reportDir 'log-context.tsv'
-            if (-not (Test-Path -LiteralPath $contextFile)) { throw 'integration did not export concurrent log-context cases' }
             $contextFailure = $false
-            foreach ($line in Get-Content -LiteralPath $contextFile) {
-                if (-not $line) { continue }
-                $parts = $line -split "`t", 2
-                if ($parts.Count -ne 2) { $contextFailure = $true; break }
-                $taskToken = 'task_id=' + $parts[0]
-                $traceToken = 'trace_id=' + $parts[1]
-                $taskLines = @(Select-String -LiteralPath (Join-Path $reportDir 'app.log') -SimpleMatch $taskToken)
-                $accepted = @($taskLines | Where-Object { $_.Line.Contains('msg="notification accepted"') -and $_.Line.Contains($traceToken) })
-                $finished = @($taskLines | Where-Object { $_.Line.Contains('msg="notification processing finished"') -and $_.Line.Contains($traceToken) })
-                if ($accepted.Count -ne 1 -or $finished.Count -ne 1) { $contextFailure = $true; break }
+            $contextSkipped = -not (Test-Path -LiteralPath $contextFile)
+            if (Test-Path -LiteralPath $contextFile) {
+                foreach ($line in Get-Content -LiteralPath $contextFile) {
+                    if (-not $line) { continue }
+                    $parts = $line -split "`t", 2
+                    if ($parts.Count -ne 2) { $contextFailure = $true; break }
+                    $taskToken = 'task_id=' + $parts[0]
+                    $traceToken = 'trace_id=' + $parts[1]
+                    $taskLines = @(Select-String -LiteralPath (Join-Path $reportDir 'app.log') -SimpleMatch $taskToken)
+                    $accepted = @($taskLines | Where-Object { $_.Line.Contains('msg="notification accepted"') -and $_.Line.Contains($traceToken) })
+                    $finished = @($taskLines | Where-Object { $_.Line.Contains('msg="notification processing finished"') -and $_.Line.Contains($traceToken) })
+                    if ($accepted.Count -ne 1 -or $finished.Count -ne 1) { $contextFailure = $true; break }
+                }
+            } elseif ($exitCode -eq 0) {
+                $contextFailure = $true
             }
             if ($contextFailure) {
                 'log_context_scan_exit_code=1' | Add-Content -LiteralPath $summary -Encoding utf8
                 'log_context_scan=FAIL' | Add-Content -LiteralPath $summary -Encoding utf8
                 if ($exitCode -eq 0) { $exitCode = 1 }
+            } elseif ($contextSkipped) {
+                'log_context_scan_exit_code=NOT_RUN' | Add-Content -LiteralPath $summary -Encoding utf8
+                'log_context_scan=NOT_RUN' | Add-Content -LiteralPath $summary -Encoding utf8
             } else {
                 'log_context_scan_exit_code=0' | Add-Content -LiteralPath $summary -Encoding utf8
                 'log_context_scan=PASS' | Add-Content -LiteralPath $summary -Encoding utf8
@@ -226,7 +235,9 @@ finally {
             if ($LASTEXITCODE -ne 0) { throw "could not inspect application image: $LASTEXITCODE" }
             $testInspect = & docker image inspect $env:TEST_IMAGE --format '{{.Id}}' 2>&1
             if ($LASTEXITCODE -ne 0) { throw "could not inspect test-runner image: $LASTEXITCODE" }
-            @("app_image_id=$appInspect","test_image_id=$testInspect") | Add-Content -LiteralPath $summary -Encoding utf8
+            $certInspect = & docker image inspect $env:CERT_IMAGE --format '{{.Id}}' 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "could not inspect cert-init image: $LASTEXITCODE" }
+            @("app_image_id=$appInspect","test_image_id=$testInspect","cert_init_image_id=$certInspect") | Add-Content -LiteralPath $summary -Encoding utf8
             $down = @('compose') + $composeArgs + @('down','--volumes','--remove-orphans')
             & docker @down 2>&1 | Tee-Object -FilePath $log -Append
             $downCode = $LASTEXITCODE

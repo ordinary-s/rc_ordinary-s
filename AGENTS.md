@@ -8,6 +8,7 @@
 - Go 工具链使用 Dockerfile 锁定的 Go 镜像。代码改动后运行 `gofmt`、`go vet ./...`、`go test -count=1 ./...` 和 `go test -race -count=1 ./...`；不可用宿主机伪装 Docker 验收。
 - MySQL 表列小写 snake_case、utf8mb4、明确排序规则、UTC `DATETIME(6)`、参数 SQL 和版本 migration；DDL 隐式提交不可假设可回滚。
 - 错误和日志不写请求/响应正文、Authorization、Cookie、凭证或含 Token 的 URL。trace/task 关联，不使用共享可变 logger 传请求状态。
+- API 服务最低 TLS 1.3；除健康探针外，所有 `/api/*` 请求必须同时通过 Bearer 鉴权与 RFC 9421 HMAC-SHA-256 签名验证。签名包含方法、authority、目标 URI、路径、Authorization、Content-Digest，通知提交还覆盖 Idempotency-Key；验证时间窗和 MySQL nonce 防重放不可绕过。HMAC 不提供加密，不新增自定义请求体加密；生产密钥和证书不得使用 Compose 演示值。
 - 不删无关文件、不运行全局 Docker prune、不覆盖/强推远端。验收仅清理由该 run 创建的 Compose project 和命名卷。
 
 ## Docker 验收

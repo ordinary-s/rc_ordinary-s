@@ -5,7 +5,10 @@ package integration
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +32,7 @@ import (
 	"github.com/ordinary-s/rc_ordinary-s/internal/delivery"
 	"github.com/ordinary-s/rc_ordinary-s/internal/mq"
 	"github.com/ordinary-s/rc_ordinary-s/internal/notification"
+	"github.com/ordinary-s/rc_ordinary-s/internal/signature"
 	"github.com/ordinary-s/rc_ordinary-s/internal/store"
 )
 
@@ -56,14 +60,169 @@ type statsView struct {
 }
 
 type suite struct {
-	t      *testing.T
-	api    string
-	mock   string
-	token  string
-	admin  string
-	db     *sql.DB
-	client *http.Client
-	report []map[string]any
+	t           *testing.T
+	api         string
+	mock        string
+	token       string
+	admin       string
+	clientKeyID string
+	clientKey   []byte
+	adminKeyID  string
+	adminKey    []byte
+	tlsRoots    *x509.CertPool
+	db          *sql.DB
+	client      *http.Client
+	report      []map[string]any
+}
+
+func newSuite(t *testing.T, api, mock string, db *sql.DB, report []map[string]any) *suite {
+	t.Helper()
+	ca, err := os.ReadFile(env(t, "TEST_TLS_CA_FILE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(ca) {
+		t.Fatal("test CA file contained no certificates")
+	}
+	clientKey, err := hex.DecodeString(env(t, "TEST_CLIENT_SIGNATURE_SECRET_HEX"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminKey, err := hex.DecodeString(env(t, "TEST_ADMIN_SIGNATURE_SECRET_HEX"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots}}
+	return &suite{
+		t: t, api: api, mock: mock, token: env(t, "TEST_CLIENT_TOKEN"), admin: env(t, "TEST_ADMIN_TOKEN"),
+		clientKeyID: env(t, "TEST_CLIENT_SIGNATURE_KEY_ID"), clientKey: clientKey,
+		adminKeyID: env(t, "TEST_ADMIN_SIGNATURE_KEY_ID"), adminKey: adminKey,
+		tlsRoots: roots, db: db, client: &http.Client{Timeout: 5 * time.Second, Transport: transport}, report: report,
+	}
+}
+
+func (s *suite) testTLSAndRequestSignatures(t *testing.T) {
+	s.reset(t)
+	response, err := s.client.Get(s.api + "/healthz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.TLS == nil || response.TLS.Version != tls.VersionTLS13 {
+		response.Body.Close()
+		t.Fatalf("TLS negotiation=%v, want TLS 1.3", response.TLS)
+	}
+	response.Body.Close()
+	tls12Client := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		MinVersion: tls.VersionTLS12, MaxVersion: tls.VersionTLS12, RootCAs: s.tlsRoots,
+	}}}
+	if response, err := tls12Client.Get(s.api + "/healthz"); err == nil {
+		response.Body.Close()
+		t.Fatal("TLS 1.2-only client unexpectedly connected")
+	}
+
+	payload, _ := json.Marshal(map[string]any{"destination_id": "mock-target", "method": "POST", "headers": map[string]string{"Content-Type": "text/plain"}, "body": "signature-test"})
+	unsigned, _ := http.NewRequest(http.MethodPost, s.api+"/api/v1/notifications", bytes.NewReader(payload))
+	unsigned.Header.Set("Authorization", "Bearer "+s.token)
+	unsigned.Header.Set("Idempotency-Key", "signature-unsigned")
+	response, err = s.client.Do(unsigned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unsigned request status=%d, want 401", response.StatusCode)
+	}
+
+	authTampered := s.newSignedRequest(t, http.MethodPost, "/api/v1/notifications", payload, "signature-auth-tampered", false)
+	authTampered.Header.Set("Authorization", "Bearer "+s.admin)
+	response, err = s.client.Do(authTampered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("authorization tampering status=%d, want 401", response.StatusCode)
+	}
+
+	clientSignedAdminRequest := s.newSignedRequest(t, http.MethodPatch, "/api/v1/admin/destinations/mock-target/fast-fail", []byte(`{"enabled":false,"reason":"role separation test"}`), "", false)
+	response, err = s.client.Do(clientSignedAdminRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("client signature on admin route status=%d, want 401", response.StatusCode)
+	}
+
+	tampered := s.newSignedRequest(t, http.MethodPost, "/api/v1/notifications", payload, "signature-tampered", false)
+	changedBody := []byte(`{"tampered":true}`)
+	wireRequest, err := http.NewRequest(http.MethodPost, s.api+"/api/v1/notifications", bytes.NewReader(changedBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wireRequest.Header = tampered.Header.Clone()
+	response, err = s.client.Do(wireRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("body tampering status=%d, want 401", response.StatusCode)
+	}
+
+	expired, _ := http.NewRequest(http.MethodPost, s.api+"/api/v1/notifications", bytes.NewReader(payload))
+	expired.Header.Set("Authorization", "Bearer "+s.token)
+	expired.Header.Set("Content-Type", "application/json")
+	expired.Header.Set("Idempotency-Key", "signature-expired")
+	if _, err := signature.SignRequestWithNonce(expired, s.clientKeyID, s.clientKey, time.Now().Add(-10*time.Minute), "expired-nonce-0123456789"); err != nil {
+		t.Fatal(err)
+	}
+	response, err = s.client.Do(expired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expired signature status=%d, want 401", response.StatusCode)
+	}
+
+	request := s.newSignedRequest(t, http.MethodPost, "/api/v1/notifications", payload, "signature-replay", false)
+	body, err := io.ReadAll(request.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Body = io.NopCloser(bytes.NewReader(body))
+	response, err = s.client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptedBody, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("signed request status=%d body=%s", response.StatusCode, acceptedBody)
+	}
+	var accepted struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal(acceptedBody, &accepted); err != nil || accepted.TaskID == "" {
+		t.Fatalf("decode accepted signed request: task_id=%q err=%v", accepted.TaskID, err)
+	}
+	replay := request.Clone(context.Background())
+	replay.Body = io.NopCloser(bytes.NewReader(body))
+	response, err = s.client.Do(replay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("replayed signature status=%d, want 401", response.StatusCode)
+	}
+	s.wait(t, accepted.TaskID, "DELIVERED")
+	s.record("tls13_and_hmac_signature", map[string]any{"negotiated_tls": "1.3", "tls12_only_rejected": true, "unsigned_rejected": true, "authorization_tampering_rejected": true, "client_signature_on_admin_route_rejected": true, "body_tampering_rejected": true, "expired_signature_rejected": true, "nonce_replay_rejected": true})
 }
 
 func TestEndToEndWithMySQLAndRocketMQ(t *testing.T) {
@@ -79,8 +238,9 @@ func TestEndToEndWithMySQLAndRocketMQ(t *testing.T) {
 	if err := db.PingContext(ctx); err != nil {
 		t.Fatalf("MySQL unavailable: %v", err)
 	}
-	s := &suite{t: t, api: api, mock: mock, token: env(t, "TEST_CLIENT_TOKEN"), admin: env(t, "TEST_ADMIN_TOKEN"), db: db, client: &http.Client{Timeout: 5 * time.Second}, report: make([]map[string]any, 0)}
+	s := newSuite(t, api, mock, db, make([]map[string]any, 0))
 	defer s.writeReport()
+	t.Run("TLS 1.3 and HMAC request signature", s.testTLSAndRequestSignatures)
 
 	t.Run("acceptance/idempotency/transaction", func(t *testing.T) {
 		s.reset(t)
@@ -316,7 +476,7 @@ func TestBrokerOutageOutboxRecoveryAndExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	s := &suite{t: t, api: env(t, "TEST_API_URL"), mock: env(t, "TEST_MOCK_URL"), token: env(t, "TEST_CLIENT_TOKEN"), admin: env(t, "TEST_ADMIN_TOKEN"), db: db, client: &http.Client{Timeout: 5 * time.Second}, report: make([]map[string]any, 0)}
+	s := newSuite(t, env(t, "TEST_API_URL"), env(t, "TEST_MOCK_URL"), db, make([]map[string]any, 0))
 	defer s.writeReport()
 	control := env(t, "TEST_CONTROL_DIR")
 	marker := func(name string) string { return filepath.Join(control, "broker-outage-"+name) }
@@ -375,7 +535,7 @@ func TestSIGTERMInterruptsInFlightDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	s := &suite{t: t, api: env(t, "TEST_API_URL"), mock: env(t, "TEST_MOCK_URL"), token: env(t, "TEST_CLIENT_TOKEN"), admin: env(t, "TEST_ADMIN_TOKEN"), db: db, client: &http.Client{Timeout: 5 * time.Second}, report: make([]map[string]any, 0)}
+	s := newSuite(t, env(t, "TEST_API_URL"), env(t, "TEST_MOCK_URL"), db, make([]map[string]any, 0))
 	defer s.writeReport()
 	control := env(t, "TEST_CONTROL_DIR")
 	marker := func(name string) string { return filepath.Join(control, "sigterm-"+name) }
@@ -687,10 +847,7 @@ func (s *suite) testResolutionDatabaseFailure(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, s.api+"/api/v1/admin/notifications/"+id+"/resolve", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+s.admin)
-	resp, err := s.client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := s.doAPI(t, req, true)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("resolution database failure status=%d, want 500", resp.StatusCode)
@@ -702,13 +859,10 @@ func (s *suite) testResolutionDatabaseFailure(t *testing.T) {
 	retryReq, _ := http.NewRequest(http.MethodPost, s.api+"/api/v1/admin/notifications/"+id+"/resolve", bytes.NewReader(body))
 	retryReq.Header.Set("Content-Type", "application/json")
 	retryReq.Header.Set("Authorization", "Bearer "+s.admin)
-	if resp, err = s.client.Do(retryReq); err != nil {
-		t.Fatal(err)
-	} else {
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("resolution after database recovery status=%d, want 200", resp.StatusCode)
-		}
+	resp = s.doAPI(t, retryReq, true)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("resolution after database recovery status=%d, want 200", resp.StatusCode)
 	}
 	var actor string
 	if err := s.db.QueryRow(`SELECT resolved_by FROM notification WHERE task_id = ?`, id).Scan(&actor); err != nil {
@@ -973,19 +1127,59 @@ func (s *suite) create(t *testing.T, key, body string) (int, []byte) {
 	return s.post(t, "/api/v1/notifications", payload, key)
 }
 
+func (s *suite) newSignedRequest(t *testing.T, method, path string, body []byte, idempotencyKey string, admin bool) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(method, s.api+path, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
+	}
+	if admin {
+		req.Header.Set("Authorization", "Bearer "+s.admin)
+		if _, err := signature.SignRequest(req, s.adminKeyID, s.adminKey, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		req.Header.Set("Authorization", "Bearer "+s.token)
+		if _, err := signature.SignRequest(req, s.clientKeyID, s.clientKey, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return req
+}
+
+func (s *suite) doAPI(t *testing.T, req *http.Request, admin bool) *http.Response {
+	t.Helper()
+	if admin {
+		req.Header.Set("Authorization", "Bearer "+s.admin)
+		if _, err := signature.SignRequest(req, s.adminKeyID, s.adminKey, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		req.Header.Set("Authorization", "Bearer "+s.token)
+		if _, err := signature.SignRequest(req, s.clientKeyID, s.clientKey, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
 func (s *suite) post(t *testing.T, path string, body []byte, key string) (int, []byte) {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, s.api+path, bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Authorization", "Bearer "+s.token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", key)
-	resp, err := s.client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := s.doAPI(t, req, false)
 	defer resp.Body.Close()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -997,11 +1191,7 @@ func (s *suite) post(t *testing.T, path string, body []byte, key string) (int, [
 func (s *suite) task(t *testing.T, id string) taskView {
 	t.Helper()
 	req, _ := http.NewRequest(http.MethodGet, s.api+"/api/v1/notifications/"+id, nil)
-	req.Header.Set("Authorization", "Bearer "+s.token)
-	resp, err := s.client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := s.doAPI(t, req, false)
 	defer resp.Body.Close()
 	var v taskView
 	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
@@ -1082,11 +1272,7 @@ func (s *suite) fastFail(t *testing.T, enabled bool) {
 	body, _ := json.Marshal(map[string]any{"enabled": enabled, "reason": "integration test"})
 	req, _ := http.NewRequest(http.MethodPatch, s.api+"/api/v1/admin/destinations/mock-target/fast-fail", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.admin)
-	resp, err := s.client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := s.doAPI(t, req, true)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("fast-fail status=%d", resp.StatusCode)

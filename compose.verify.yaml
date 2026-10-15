@@ -8,5 +8,5 @@ services:
       MQ_MAX_RECONSUME: 2
   test-runner:
     environment:
-      TEST_API_URL: http://app:8080
+      TEST_API_URL: https://app:8443
       TEST_HTTP_TIMEOUT: 45s

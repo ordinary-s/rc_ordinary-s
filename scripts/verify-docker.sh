@@ -20,6 +20,7 @@ EVIDENCE="$ROOT/docs/evidence/$RUN_ID"
 mkdir -p "$REPORT" "$EVIDENCE"
 export APP_IMAGE=rc-notification:0.1.0
 export TEST_IMAGE=rc-notification-test:0.1.0
+export CERT_IMAGE=rc-notification-cert-init:0.1.0
 export ADMIN_ACTOR=integration-test
 export DELIVERY_BUDGET=90s
 export MQ_CONSUME_TIMEOUT=2m
@@ -62,8 +63,9 @@ cleanup() {
       fi
     fi
     context_failure=0
+    context_skipped=0
     if [[ ! -f "$REPORT/log-context.tsv" ]]; then
-      context_failure=1
+      if (( status == 0 )); then context_failure=1; else context_skipped=1; fi
     else
       while IFS=$'\t' read -r task_id trace_id; do
         [[ -n "$task_id" && -n "$trace_id" ]] || continue
@@ -81,6 +83,9 @@ cleanup() {
       echo 'log_context_scan_exit_code=1' >> "$REPORT/summary.txt"
       echo 'log_context_scan=FAIL' >> "$REPORT/summary.txt"
       if (( status == 0 )); then status=1; fi
+    elif (( context_skipped )); then
+      echo 'log_context_scan_exit_code=NOT_RUN' >> "$REPORT/summary.txt"
+      echo 'log_context_scan=NOT_RUN' >> "$REPORT/summary.txt"
     else
       echo 'log_context_scan_exit_code=0' >> "$REPORT/summary.txt"
       echo 'log_context_scan=PASS' >> "$REPORT/summary.txt"
@@ -102,6 +107,7 @@ cleanup() {
   fi
   if docker image inspect "$APP_IMAGE" --format 'app_image_id={{.Id}}' >> "$REPORT/summary.txt" 2>&1; then :; else code=$?; if (( status == 0 )); then status=$code; fi; fi
   if docker image inspect "$TEST_IMAGE" --format 'test_image_id={{.Id}}' >> "$REPORT/summary.txt" 2>&1; then :; else code=$?; if (( status == 0 )); then status=$code; fi; fi
+  if docker image inspect "$CERT_IMAGE" --format 'cert_init_image_id={{.Id}}' >> "$REPORT/summary.txt" 2>&1; then :; else code=$?; if (( status == 0 )); then status=$code; fi; fi
   if (( status == 0 )); then echo "result=PASS" >> "$REPORT/summary.txt"; else echo "result=FAIL" >> "$REPORT/summary.txt"; fi
   echo "finished_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$REPORT/summary.txt"
   cp "$REPORT/summary.txt" "$EVIDENCE/summary.txt"
@@ -142,6 +148,7 @@ run_phase 'docker compose version' docker compose version
 run_phase 'compose config --quiet' "${COMPOSE[@]}" config --quiet
 run_phase 'build application image' docker build --pull --target runtime -t "$APP_IMAGE" .
 run_phase 'build test-runner image' docker build --pull --target test-runner -t "$TEST_IMAGE" .
+run_phase 'build local certificate initializer image' docker build --pull --target cert-init -t "$CERT_IMAGE" .
 TOUCHED=1
 run_phase 'start isolated stack' "${COMPOSE[@]}" up -d app
 deadline=$((SECONDS + 300))

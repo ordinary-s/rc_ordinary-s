@@ -9,6 +9,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/server 
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/migrate ./cmd/migrate
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/mock-target ./cmd/mock-target
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/healthcheck ./cmd/healthcheck
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/devcert ./cmd/devcert
 FROM ${GO_IMAGE} AS test-runner
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -24,5 +25,11 @@ COPY --from=build --chown=65532:65532 /out/mock-target /app/mock-target
 COPY --from=build --chown=65532:65532 /out/healthcheck /app/healthcheck
 COPY --chown=65532:65532 migrations /app/migrations
 USER 65532:65532
-EXPOSE 8080
+EXPOSE 8443
 ENTRYPOINT ["/app/server"]
+
+FROM ${RUNTIME_IMAGE} AS cert-init
+WORKDIR /app
+COPY --from=build /out/devcert /app/devcert
+USER 0:0
+ENTRYPOINT ["/bin/sh", "-c"]

@@ -1,0 +1,11 @@
+project_root=D:\rc_notification
+dev_up_command=.\scripts\dev-up.ps1
+dev_up_exit_code=0
+demo_client_command=docker compose -p rcnotif-dev --profile verify run --rm --build test-runner go run ./cmd/demo-client
+demo_client_exit_code=0
+api_response=status=202 tls=TLS 1.3
+health_commands=curl.exe --ssl-no-revoke --cacert .local-certs\ca.crt https://localhost:8443/healthz and /readyz
+health_exit_code=0
+health_outputs={"status":"live"} and {"status":"ready"}
+credentials=local .env.example demo values; omitted
+task_id=omitted

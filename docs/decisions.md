@@ -121,3 +121,11 @@ Consumer 正常完成时返回 `ConsumeSuccess`，执行未可靠完成时返回
 端到端验证同时观察数据库状态、消息重投和 HTTP 次数，才能判断责任是否正确交接。容器启动和单元测试各自有用，但无法单独回答 Outbox 补偿、重复消息或进程中断后的实际行为。
 
 验收入口已经实现，见 [PowerShell 脚本](../scripts/verify-docker.ps1) 和 [Bash 脚本](../scripts/verify-docker.sh)。归档通过记录的日期、环境、命令和场景见[验收记录](verification.md)。这些场景验证的是当前单实例开发拓扑，生产容量、HA 和更完整的网络故障组合仍需另行验证。
+
+## D15：TLS 1.3 保护传输，HMAC 签名验证 API 请求
+
+API 服务最低使用 TLS 1.3；除健康探针外，`/api/*` 同时要求 Bearer token 和 RFC 9421 `hmac-sha256` 签名，使用 RFC 9530 `Content-Digest`，把方法、authority、目标 URI、路径和认证信息纳入签名，提交通知时再覆盖幂等键。签名带有效期和 nonce，已使用 nonce 存入 MySQL 防止重放。客户端与管理员使用不同密钥身份。
+
+用户讨论后选择了“先保护传输、按需加请求签名”这两个方面。没有增加自定义请求体加密：它不能替代 TLS，还会引入密钥分发和轮换负担；HMAC 也不提供保密性。生产可使用受控 TLS 网关，但要限制应用入口，并保证被签名的外部请求目标信息可被可信地校验。当前 Compose 的证书和 HMAC 值仅是本地演示配置。
+
+当前已实现，见 [TLS 启动](../cmd/server/main.go)、[签名策略](../internal/signature/signature.go)、[nonce migration](../migrations/003_api_signature_nonce.sql)、[Compose](../compose.yaml) 和 demo client。真实 TLS1.3 协商、TLS1.2 拒绝、无签名/篡改/过期/重放请求拒绝由 Docker E2E 验证；最新结果见[验收报告](verification.md)。

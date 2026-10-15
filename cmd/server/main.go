@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
+	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
@@ -66,14 +68,22 @@ func main() {
 	apiServer := api.New(cfg, repository, notificationService, logger, func(ctx context.Context) error {
 		return mqClient.Ready(ctx, cfg.BrokerAddress)
 	})
+	certificate, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+	if err != nil {
+		logger.Error("TLS certificate loading failed", "error_type", fmt.Sprintf("%T", err))
+		stop()
+		_ = mqClient.Shutdown()
+		os.Exit(1)
+	}
 	server := &http.Server{
-		Addr: cfg.HTTPAddr, Handler: apiServer.Handler(), ReadHeaderTimeout: 5 * time.Second,
+		Addr: cfg.HTTPSAddr, Handler: apiServer.Handler(), ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 * 1024,
+		TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate}},
 	}
 	serverErrors := make(chan error, 1)
 	go func() {
-		logger.Info("HTTP server started", "addr", cfg.HTTPAddr)
-		serverErrors <- server.ListenAndServe()
+		logger.Info("HTTPS server started", "addr", cfg.HTTPSAddr, "tls_min", "1.3")
+		serverErrors <- server.ListenAndServeTLS("", "")
 	}()
 
 	select {

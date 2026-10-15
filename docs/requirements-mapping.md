@@ -14,6 +14,6 @@
 | 用户补充 | Docker 内 gofmt、vet、普通测试、race、真实依赖 E2E，全部阶段退出码准确 | `docs/verification.md` | `scripts/verify-docker.ps1`、`.sh`、Compose override | `reports/20261015T074216Z-479b6b19/` 与 `docs/evidence/20261015T074216Z-479b6b19/` | PASS |
 | 用户补充 | 单条消费、原生异常重试与 DLQ；不增加业务失败重放路径 | `docs/design.md`、`docs/decisions.md` | `internal/mq/rocket.go` | 数据库异常重投、DLQ 到达条件 | PASS |
 | 用户补充 | 配置快速失败、恢复后不自动复活终态；有人工核对记录 | README、`docs/design.md` | API、Store、Compose seed | 快速失败/关闭恢复/旧任务不复活场景 | PASS |
-| 用户补充 | 不提交凭证、完整请求/响应或无关附件；保留既有仓库可见性 | `README.md`、`docs/verification.md` | `.gitignore`、`.dockerignore` | 提交前 `git status`、暂存 diff、密钥扫描与远端回读 | NOT_RUN（远端交付阶段） |
+| 用户补充 | 不提交凭证、完整请求/响应或无关附件；保留既有仓库可见性 | `README.md`、`docs/verification.md` | `.gitignore`、`.dockerignore` | 暂存区安全扫描；`ordinary-s/rc_ordinary-s` 的公开状态、`main` 分支 SHA 与核心文件通过 GitHub API 回读 | PASS |
 | 用户补充：增长路线 | 调用方限流、机构配额、分组隔离、独立扩容与自动熔断 | `docs/assignment-answers.md`、D13 | — | 未作为 MVP 验收门槛 | 后续设计 |
 | 用户补充：边界 | 多实例全局限流、HA、自动 DLQ 工单、终态自动重放 | `docs/design.md`、`docs/implementation-review.md` | 当前未实现 | 不适用 | 后续设计 |

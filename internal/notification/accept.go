@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -25,6 +26,17 @@ type Input struct {
 }
 
 var ErrInvalidInput = fmt.Errorf("invalid notification input")
+
+// ProtocolError marks an MQ envelope that is permanently invalid for this protocol version.
+type ProtocolError struct {
+	Reason string
+	Cause  error
+}
+
+func (e *ProtocolError) Error() string { return e.Reason }
+func (e *ProtocolError) Unwrap() error { return e.Cause }
+
+func (e *ProtocolError) Code() string { return e.Reason }
 
 type Service struct {
 	store       *store.Store
@@ -47,19 +59,33 @@ func NewService(s *store.Store, allowedTarget string) (*Service, error) {
 	}, nil
 }
 
-func (s *Service) Accept(ctx context.Context, clientID, idempotencyKey, traceID string, input Input, maxBodyBytes int64, maxHeaderBytes int, ttl time.Duration) (domain.Notification, bool, error) {
+// Ingest validates and durably records a trusted upstream MQ event before HTTP delivery begins.
+func (s *Service) Ingest(ctx context.Context, clientID, eventID, traceID string, expiresAt time.Time, input Input, maxBodyBytes int64, maxHeaderBytes int, maxTTL time.Duration) (domain.Notification, bool, error) {
+	if !validEventID(eventID) || !validTraceID(traceID) {
+		return domain.Notification{}, false, &ProtocolError{Reason: "EVENT_IDENTIFIER_INVALID"}
+	}
+	if expiresAt.IsZero() {
+		return domain.Notification{}, false, &ProtocolError{Reason: "EVENT_EXPIRY_INVALID"}
+	}
+	expiresAt = expiresAt.UTC().Truncate(time.Microsecond)
+	if expiresAt.After(time.Now().UTC().Add(maxTTL)) {
+		return domain.Notification{}, false, &ProtocolError{Reason: "EVENT_EXPIRY_TOO_FAR"}
+	}
 	input, body, headerJSON, err := validateInput(input, maxBodyBytes, maxHeaderBytes)
 	if err != nil {
-		return domain.Notification{}, false, fmt.Errorf("%w: %v", ErrInvalidInput, err)
+		return domain.Notification{}, false, &ProtocolError{Reason: "EVENT_INVALID", Cause: fmt.Errorf("%w: %v", ErrInvalidInput, err)}
 	}
 	destination, err := s.store.GetDestination(ctx, input.DestinationID)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return domain.Notification{}, false, &ProtocolError{Reason: "DESTINATION_UNKNOWN", Cause: err}
+		}
 		return domain.Notification{}, false, err
 	}
 	if !validTarget(destination.URL, s.allowedHost, s.allowedPort, s.allowedTLS) {
-		return domain.Notification{}, false, fmt.Errorf("destination target is outside the configured allowlist")
+		return domain.Notification{}, false, &ProtocolError{Reason: "DESTINATION_OUTSIDE_ALLOWLIST"}
 	}
-	hash, err := fingerprint(input.DestinationID, input.Method, input.Headers, body)
+	hash, err := eventFingerprint(input.DestinationID, input.Method, input.Headers, body, expiresAt)
 	if err != nil {
 		return domain.Notification{}, false, fmt.Errorf("fingerprint notification: %w", err)
 	}
@@ -70,16 +96,45 @@ func (s *Service) Accept(ctx context.Context, clientID, idempotencyKey, traceID 
 	n := domain.Notification{
 		ID:             id,
 		ClientID:       clientID,
-		IdempotencyKey: idempotencyKey,
+		IdempotencyKey: eventID,
+		SourceEventID:  eventID,
 		Fingerprint:    hash,
 		DestinationID:  input.DestinationID,
 		Method:         input.Method,
 		HeadersJSON:    headerJSON,
 		Body:           body,
 		TraceID:        traceID,
-		ExpiresAt:      time.Now().UTC().Add(ttl),
+		ExpiresAt:      expiresAt,
 	}
-	return s.store.Accept(ctx, n)
+	n, created, err := s.store.Ingest(ctx, n)
+	if errors.Is(err, store.ErrConflict) {
+		return domain.Notification{}, false, &ProtocolError{Reason: "EVENT_ID_CONTENT_CONFLICT", Cause: err}
+	}
+	return n, created, err
+}
+
+func validEventID(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._:-", r)) {
+			return false
+		}
+	}
+	return true
+}
+
+func validTraceID(value string) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for _, r := range value {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._-", r)) {
+			return false
+		}
+	}
+	return true
 }
 
 func fingerprint(destinationID, method string, headers map[string]string, body []byte) ([]byte, error) {
@@ -90,6 +145,28 @@ func fingerprint(destinationID, method string, headers map[string]string, body [
 		Body          string            `json:"body"`
 	}
 	data, err := json.Marshal(canonical{DestinationID: destinationID, Method: method, Headers: headers, Body: string(body)})
+	if err != nil {
+		return nil, err
+	}
+	hash := sha256.Sum256(data)
+	return hash[:], nil
+}
+
+func eventFingerprint(destinationID, method string, headers map[string]string, body []byte, expiresAt time.Time) ([]byte, error) {
+	type canonical struct {
+		DestinationID string            `json:"destination_id"`
+		Method        string            `json:"method"`
+		Headers       map[string]string `json:"headers"`
+		Body          string            `json:"body"`
+		ExpiresAt     string            `json:"expires_at"`
+	}
+	data, err := json.Marshal(canonical{
+		DestinationID: destinationID,
+		Method:        method,
+		Headers:       headers,
+		Body:          string(body),
+		ExpiresAt:     expiresAt.UTC().Format(time.RFC3339Nano),
+	})
 	if err != nil {
 		return nil, err
 	}

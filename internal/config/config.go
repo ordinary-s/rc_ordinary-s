@@ -17,9 +17,9 @@ type Config struct {
 	NameServer           string
 	BrokerAddress        string
 	Topic                string
-	ProducerGroup        string
 	ConsumerGroup        string
 	ClientID             string
+	MQTrustedClientID    string
 	ClientToken          string
 	AdminToken           string
 	AdminActor           string
@@ -37,9 +37,9 @@ type Config struct {
 	MQConsumeTimeout     time.Duration
 	TaskTTL              time.Duration
 	Backoffs             []time.Duration
-	OutboxPoll           time.Duration
 	MaxBodyBytes         int64
 	MaxHeaderBytes       int
+	MaxMessageBytes      int
 }
 
 func Load() (Config, error) {
@@ -50,10 +50,10 @@ func Load() (Config, error) {
 		DBDSN:                env("DB_DSN", "notification_app:notification-app-local@tcp(mysql:3306)/notifications?parseTime=true&loc=UTC&charset=utf8mb4"),
 		NameServer:           env("ROCKETMQ_NAMESRV", "namesrv:9876"),
 		BrokerAddress:        env("ROCKETMQ_BROKER_ADDR", "broker:10911"),
-		Topic:                env("ROCKETMQ_TOPIC", "notification_delivery"),
-		ProducerGroup:        env("ROCKETMQ_PRODUCER_GROUP", "notification_outbox_publisher"),
-		ConsumerGroup:        env("ROCKETMQ_CONSUMER_GROUP", "notification_delivery_workers"),
-		ClientID:             env("CLIENT_ID", "demo-client"),
+		Topic:                env("ROCKETMQ_TOPIC", "notification_ingress_v1"),
+		ConsumerGroup:        env("ROCKETMQ_CONSUMER_GROUP", "notification_ingress_workers_v1"),
+		ClientID:             env("CLIENT_ID", "demo-upstream"),
+		MQTrustedClientID:    env("MQ_TRUSTED_CLIENT_ID", env("CLIENT_ID", "demo-upstream")),
 		ClientToken:          env("CLIENT_TOKEN", "demo-client-token"),
 		AdminToken:           env("ADMIN_TOKEN", "demo-admin-token"),
 		AdminActor:           env("ADMIN_ACTOR", "local-admin"),
@@ -69,9 +69,9 @@ func Load() (Config, error) {
 		MQConsumeTimeout:     2 * time.Minute,
 		TaskTTL:              30 * time.Minute,
 		Backoffs:             []time.Duration{10 * time.Second, 20 * time.Second},
-		OutboxPoll:           time.Second,
 		MaxBodyBytes:         256 * 1024,
 		MaxHeaderBytes:       16 * 1024,
+		MaxMessageBytes:      1024 * 1024,
 	}
 	var err error
 	if c.ClientSignatureKey, err = secretEnv("CLIENT_SIGNATURE_SECRET_HEX", "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"); err != nil {
@@ -98,9 +98,6 @@ func Load() (Config, error) {
 	if c.TaskTTL, err = durationEnv("TASK_TTL", c.TaskTTL); err != nil {
 		return Config{}, err
 	}
-	if c.OutboxPoll, err = durationEnv("OUTBOX_POLL", c.OutboxPoll); err != nil {
-		return Config{}, err
-	}
 	if c.Backoffs, err = durationListEnv("HTTP_BACKOFFS", c.Backoffs); err != nil {
 		return Config{}, err
 	}
@@ -118,8 +115,8 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("HTTP_BACKOFFS values must not be negative")
 		}
 	}
-	if c.HTTPTimeout <= 0 || c.DeliveryBudget <= 0 || c.MQConsumeTimeout <= 0 || c.TaskTTL <= 0 || c.OutboxPoll <= 0 {
-		return Config{}, fmt.Errorf("timeouts and polling interval must be positive")
+	if c.HTTPTimeout <= 0 || c.DeliveryBudget <= 0 || c.MQConsumeTimeout <= 0 || c.TaskTTL <= 0 {
+		return Config{}, fmt.Errorf("timeouts must be positive")
 	}
 	minimumDeliveryBudget := 3*c.HTTPTimeout + c.Backoffs[0] + c.Backoffs[1] + 950*time.Millisecond + 5*time.Second
 	if c.DeliveryBudget < minimumDeliveryBudget {
@@ -128,8 +125,8 @@ func Load() (Config, error) {
 	if c.DeliveryBudget+5*time.Second > c.MQConsumeTimeout {
 		return Config{}, fmt.Errorf("MQ_CONSUME_TIMEOUT must exceed DELIVERY_BUDGET by at least 5s")
 	}
-	if strings.TrimSpace(c.ClientToken) == "" || strings.TrimSpace(c.AdminToken) == "" || strings.TrimSpace(c.AdminActor) == "" {
-		return Config{}, fmt.Errorf("client token, admin token, and admin actor must be configured")
+	if strings.TrimSpace(c.ClientToken) == "" || strings.TrimSpace(c.AdminToken) == "" || strings.TrimSpace(c.AdminActor) == "" || !validActor(c.MQTrustedClientID) {
+		return Config{}, fmt.Errorf("client token, admin token, admin actor, and a valid MQ_TRUSTED_CLIENT_ID must be configured")
 	}
 	if !validActor(c.ClientSignatureKeyID) || !validActor(c.AdminSignatureKeyID) || c.ClientSignatureKeyID == c.AdminSignatureKeyID {
 		return Config{}, fmt.Errorf("signature key IDs must be distinct 1-64 character identifiers")

@@ -4,7 +4,6 @@ services:
       HTTP_TIMEOUT: 3s
       HTTP_BACKOFFS: 20ms,40ms
       TASK_TTL: 2m
-      OUTBOX_POLL: 100ms
       MQ_MAX_RECONSUME: 2
   test-runner:
     environment:

@@ -17,7 +17,6 @@ import (
 
 	"github.com/ordinary-s/rc_ordinary-s/internal/config"
 	"github.com/ordinary-s/rc_ordinary-s/internal/domain"
-	"github.com/ordinary-s/rc_ordinary-s/internal/notification"
 	"github.com/ordinary-s/rc_ordinary-s/internal/signature"
 	"github.com/ordinary-s/rc_ordinary-s/internal/store"
 )
@@ -25,16 +24,15 @@ import (
 type Server struct {
 	cfg           config.Config
 	store         *store.Store
-	notifications *notification.Service
 	logger        *slog.Logger
 	mqReady       func(context.Context) error
 	signatureKeys map[string][]byte
 	nonceCounter  atomic.Uint64
 }
 
-func New(cfg config.Config, s *store.Store, notifications *notification.Service, logger *slog.Logger, mqReady func(context.Context) error) *Server {
+func New(cfg config.Config, s *store.Store, logger *slog.Logger, mqReady func(context.Context) error) *Server {
 	return &Server{
-		cfg: cfg, store: s, notifications: notifications, logger: logger, mqReady: mqReady,
+		cfg: cfg, store: s, logger: logger, mqReady: mqReady,
 		signatureKeys: map[string][]byte{
 			cfg.ClientSignatureKeyID: cfg.ClientSignatureKey,
 			cfg.AdminSignatureKeyID:  cfg.AdminSignatureKey,
@@ -46,7 +44,6 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /readyz", s.ready)
-	mux.HandleFunc("POST /api/v1/notifications", s.createNotification)
 	mux.HandleFunc("GET /api/v1/notifications/{id}", s.getNotification)
 	mux.HandleFunc("GET /api/v1/notifications", s.listNotifications)
 	mux.HandleFunc("PATCH /api/v1/admin/destinations/{id}/fast-fail", s.setFastFail)
@@ -128,60 +125,6 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
-}
-
-func (s *Server) createNotification(w http.ResponseWriter, r *http.Request) {
-	clientID, ok := s.authenticateClient(r)
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxBodyBytes+int64(s.cfg.MaxHeaderBytes)+32*1024)
-	var input notification.Input
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid notification request")
-		return
-	}
-	if decoder.Decode(&struct{}{}) != io.EOF {
-		writeError(w, http.StatusBadRequest, "request must contain one JSON object")
-		return
-	}
-	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	if idempotencyKey == "" || len(idempotencyKey) > 128 {
-		writeError(w, http.StatusBadRequest, "Idempotency-Key is required and limited to 128 bytes")
-		return
-	}
-	traceID := r.Header.Get("X-Trace-ID")
-	if !validToken(traceID, 64) {
-		var err error
-		traceID, err = notification.NewID()
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "could not create trace id")
-			return
-		}
-	}
-	n, created, err := s.notifications.Accept(r.Context(), clientID, idempotencyKey, traceID, input, s.cfg.MaxBodyBytes, s.cfg.MaxHeaderBytes, s.cfg.TaskTTL)
-	if errors.Is(err, store.ErrConflict) {
-		writeError(w, http.StatusConflict, "idempotency key was used with different content")
-		return
-	}
-	if errors.Is(err, notification.ErrInvalidInput) {
-		writeError(w, http.StatusBadRequest, "invalid notification request")
-		return
-	}
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusBadRequest, "destination not found")
-		return
-	}
-	if err != nil {
-		s.logger.Error("notification acceptance failed", "trace_id", traceID, "code", "ACCEPT_FAILED", "error_type", fmt.Sprintf("%T", err))
-		writeError(w, http.StatusInternalServerError, "notification could not be accepted")
-		return
-	}
-	s.logger.Info("notification accepted", "trace_id", n.TraceID, "task_id", n.ID, "destination_id", n.DestinationID, "result", "ACCEPTED", "created", created)
-	writeJSON(w, http.StatusAccepted, map[string]any{"task_id": n.ID, "trace_id": n.TraceID, "status": n.Status, "created": created})
 }
 
 func (s *Server) getNotification(w http.ResponseWriter, r *http.Request) {
@@ -345,18 +288,6 @@ func decodeLimited(w http.ResponseWriter, r *http.Request, dst any, maxBytes int
 		return fmt.Errorf("multiple JSON values")
 	}
 	return nil
-}
-
-func validToken(s string, max int) bool {
-	if s == "" || len(s) > max {
-		return false
-	}
-	for _, r := range s {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.') {
-			return false
-		}
-	}
-	return true
 }
 
 func validStatus(s string) bool {

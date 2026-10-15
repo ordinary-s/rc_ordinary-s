@@ -1,29 +1,33 @@
-# 工程规范落实
+# 工程规范依据与落实位置
 
-这里记录本项目采用的规范依据、具体约定和可核验位置。表内命名、时间写法和限额属于项目约定，不表示对应技术的唯一官方做法。
+本表把工程规则、代码/配置位置与实际自动检查连接起来。MySQL 命名、UTC 时间表示、限额等是项目约定，不是相关产品唯一官方做法。
 
-| 规则 | 本项目落实位置 | 自动检查或真实验证 |
+| 规则 | 代码或配置落实 | 自动检查 / 真实验证 |
 |---|---|---|
-| Go 使用短职责包、显式依赖、context 传播、错误返回；导出 API 说明关键行为 | `cmd/`、`internal/`；I/O 入口显式接收 context；服务生命周期在 `cmd/server/main.go` 管理 | `scripts/verify-docker.ps1` / `.sh` 在固定 Go 容器中运行 gofmt、`go vet ./...`、`go test -count=1 ./...`、`go test -race -count=1 ./...` |
-| Go 格式与依赖可复现 | `go.mod`、`go.sum`；Dockerfile 固定带 digest 的 Go 镜像 | 验收脚本检查 gofmt 无差异并构建应用/test-runner；输出分别记录退出码 |
-| TLS 仅使用 TLS 1.3 或更高版本；依赖 Go 标准库默认安全密码套件，不硬编码 cipher 列表 | `cmd/server/main.go` 设置 `tls.Config.MinVersion=tls.VersionTLS13`，证书来自 `TLS_CERT_FILE` / `TLS_KEY_FILE`；健康检查校验本地 CA | 真实 HTTPS E2E 检查协商版本为 TLS 1.3，并用 TLS1.2-only 客户端确认握手被拒绝；Docker run 证据包含应用握手日志 |
-| HTTP API 的 HMAC 签名验证身份/完整性，不能代替 TLS；摘要按 RFC 9530，签名按 RFC 9421 | `internal/signature/signature.go` 使用 `hmac-sha256`，覆盖 `@method`、`@authority`、`@target-uri`、`@path`、`authorization`、`content-digest`；通知提交再覆盖 `idempotency-key` | 单元和真实 API E2E 检查无签名、篡改正文、过期签名均被拒绝；标准定义并不替代本项目测试 |
-| 请求签名要防重放，密钥角色最小区分 | `internal/api/server.go` 强制 client/admin key ID 与 Bearer token 配对；`migrations/003_api_signature_nonce.sql` 以二进制 `(key_id, nonce)` 唯一键持久化 nonce，并索引到期清理 | 真实 MySQL E2E 重放同一签名得到 401；重复键唯一冲突按 replay 分类；nonce 写库故障返回 503 |
-| MySQL 主键、非空关联、唯一约束与索引对应实际查询 | `migrations/001_initial.sql` 至 `003_api_signature_nonce.sql`；表/列/索引使用小写 snake_case（项目约定）；幂等键、nonce 使用区分大小写比较 | Docker E2E 验证并发幂等、区分大小写、Outbox `EXPLAIN` 与 nonce 重放；migration 在隔离空库执行 |
-| InnoDB 事务边界短且明确；notification 与 Outbox 原子提交，网络调用不在事务内；DDL 隐式提交按迁移处理 | `internal/store/store.go`；迁移脚本按序执行；运行应用账号只需 DML，迁移入口使用受限于本地初始化的账户 | 真实 MySQL 检查 notification/outbox 同时存在；MySQL 注入场景覆盖更新故障与恢复；`EXPLAIN` 保存于 E2E 报告 |
-| UTC `DATETIME(6)` 与 UTF-8；用户 SQL 参数化、显式列名、分页有界稳定 | MySQL Compose 启动参数、DSN `parseTime=true&loc=UTC&charset=utf8mb4`、migration 和 Store 查询 | Docker E2E 查询连接时区 `+00:00`、查询 Outbox 索引计划并验证请求正文保真 |
-| RocketMQ 固定 Broker/Go SDK 版本；单条确认、有限并发；Outbox 仅在确认 `SendOK` 后标记发布；异常使用原生重试/DLQ | RocketMQ `5.5.0` 镜像；`rocketmq-client-go/v2 v2.1.2`；`internal/mq/rocket.go`、`internal/outbox/publisher.go`、Compose Topic/Group init | 真实 Broker E2E 覆盖发布/消费、重复消息、数据库异常重投、原生重试进入 DLQ；Broker 中断恢复与 SIGTERM 由宿主脚本驱动 |
-| 不记录凭证和完整通知内容；每请求日志上下文不共享可变 task/trace | `internal/api/`、`internal/delivery/`、`internal/outbox/` 使用局部结构化字段；Compose 日志轮转 | E2E 检查并发 task/trace 配对、正文 canary /凭证扫描；该扫描是有限覆盖，不代表全部异常路径形式化脱敏 |
-| 测试环境隔离，依赖就绪按 healthcheck 等待，失败返回非零 | `compose.yaml`、`compose.verify.yaml`、`scripts/verify-docker.ps1`、`scripts/verify-docker.sh` | 验收构建应用和工具链镜像、跑 MySQL/RocketMQ/mock target 实测；使用隔离 project 与命名卷，导出 `reports/<run_id>/` |
+| Go 使用短职责包、MixedCaps 导出名、显式依赖；I/O 接收 context；普通错误返回并包装；管理 goroutine 退出 | cmd/server、internal/api、notification、store、delivery、mq | Docker 测试镜像 gofmt 检查、go vet ./…、go test -count=1 ./…、go test -race -count=1 ./… |
+| Go 源码格式、依赖和工具链可复现 | go.mod/go.sum、Dockerfile 固定 Go 镜像摘要 | verify-docker 在固定 Linux Go 工具镜像执行 gofmt 差异检查和 go mod tidy -diff；镜像构建记录 |
+| RocketMQ 版本/API 配套 | RocketMQ 5.5.0；github.com/apache/rocketmq-client-go/v2 v2.1.2；internal/mq/rocket.go | 集成测试使用真实 5.5.0 NameServer/Broker；实际发布、单条消费、执行失败重投与 DLQ |
+| RocketMQ 消费确认遵守 Go PushConsumer API | callback 验证消息恰为一条；已保存终态返回 ConsumeSuccess；未完成返回 ConsumeRetryLater + error；WithMaxReconsumeTimes 有界 | 真实 Broker E2E 核验 DB 异常重投和达到上限的 DLQ；ProtocolError 不跳过原生处理 |
+| Topic/Group 显式创建且地址可路由 | notification_ingress_v1 / notification_ingress_workers_v1；Compose mq-init；服务解析 NameServer DNS，Broker advertised address 为容器可达地址 | 隔离环境初始化后检查 readyz；跨容器测试实际发送/消费，不把容器 running 作为成功 |
+| 上游 MQ 事件版本、大小、编码明确 | internal/mq/rocket.go 的 DecodeEvent；schema_version=1、限制字节数、拒绝未知字段/尾随 JSON/非 UTF-8 | rocket_test.go 覆盖未知版本/字段、UTC、大小、非法 UTF-8、尾随 JSON；真实 E2E 覆盖协议错误 DLQ |
+| 新入口先持久化再做外部 I/O | internal/notification/accept.go 校验和指纹；internal/store/store.go 用唯一键保存 notification；delivery 在落库后调用 | MySQL 注入任务写入失败时确认无 HTTP，再观察原生 MQ 恢复；同 event_id 并发重复只保留一个任务 |
+| 事件幂等与大小写行为明确 | migration 004 为 (client_id,source_event_id) 添加唯一键；二进制区分大小写 collation；trace_id 不纳入指纹 | 真实 MySQL 验证并发重复、相同键异内容冲突、重投不增加 HTTP |
+| 旧 outbox 兼容不代表新版仍发布 | migration 001 的 outbox 表保留；新版 Store 不创建、不更新、不扫描 outbox；无 internal/outbox Publisher | 代码审阅和真实 E2E 直接从 MQ 驱动；不以旧 Outbox 测试描述新流程 |
+| MySQL/InnoDB 事务、主键、约束、索引与 DDL 行为 | migrations/*.sql；internal/store/store.go；运行 DML 账号与迁移入口分离 | 新隔离库顺序 migration；真实 MySQL 验证唯一约束、UTC 连接与查询状态；migration 用新增文件演进 |
+| 表/列/索引小写 snake_case、utf8mb4、明确 collation；UTC DATETIME(6) | migrations/001_initial.sql、migration 004、DSN parseTime/loc=UTC/charset=utf8mb4 | 集成测试查询 MySQL 会话 UTC、幂等标识大小写和关键索引；这些格式是项目约定 |
+| SQL 参数化、显式列、稳定分页；连接池和 I/O 有限 | internal/store/store.go；internal/config/config.go；http.Transport 与 DB pool 配置 | 集成 API 分页/客户端隔离；docker logs 和测试约束；README 明示 Body/Header/消息体限额 |
+| HTTP 尝试、MQ 重投分离；副作用不明时停止自动重发 | internal/delivery/engine.go、delivery_attempt 状态更新和恢复逻辑 | 503 mock 精确断言三次应用尝试和三次 mock 请求；DB 异常真 Broker 重投；SIGTERM 后 UNCERTAIN 且无第二次 HTTP |
+| API TLS 版本与标准签名 | cmd/server/main.go 设置 MinVersion TLS 1.3；internal/signature 使用 RFC 9421 HMAC-SHA-256 和 RFC 9530 Content-Digest | 真实 HTTPS 测 TLS1.3 协商、TLS1.2 拒绝、无签名/篡改/过期签名失败 |
+| API nonce 防重放、身份分权 | migration 003 唯一保存 key_id+nonce；internal/api/server.go 区分 client/admin bearer 与签名 key | 真实 MySQL 重放返回拒绝；客户端 key 访问管理员接口失败；HMAC 不被描述成加密 |
+| SSRF、HTTP 请求大小及隐私控制 | destination host/scheme/port allowlist、header/body 限额、redirect 禁用、TLS 校验保留；日志不写全文 | mock target 只在 Compose 网络 allowlist；原始 XML/表单 E2E；日志敏感 canary 扫描 |
+| Compose 依赖健康、隔离与报告 | compose.yaml、compose.verify.yaml、verify-docker.ps1/.sh | 脚本检查 Docker/Compose、compose config --quiet、健康等待、build、测试、退出码、脱敏报告和仅清理本 project |
 
-## 官方资料
+## 官方依据
 
-- [Effective Go](https://go.dev/doc/effective_go)、[Go Code Review Comments](https://go.dev/wiki/CodeReviewComments)、[Go Race Detector](https://go.dev/doc/articles/race_detector)
-- [Go `crypto/tls` for Go 1.27.2](https://pkg.go.dev/crypto/tls@go1.27.2)
-- [TLS 1.3: RFC 9846](https://www.rfc-editor.org/rfc/rfc9846.html)；版本修订保留 TLS 1.3 语义
-- [HTTP Message Signatures: RFC 9421](https://www.rfc-editor.org/rfc/rfc9421.html)；[Content-Digest: RFC 9530](https://www.rfc-editor.org/rfc/rfc9530.html)
-- [MySQL 8.4 InnoDB commit/rollback](https://dev.mysql.com/doc/refman/8.4/en/innodb-autocommit-commit-rollback.html)、[primary key](https://dev.mysql.com/doc/refman/8.4/en/constraint-primary-key.html)、[implicit commit](https://dev.mysql.com/doc/refman/8.4/en/implicit-commit.html)
-- [RocketMQ consumer retry policy](https://rocketmq.apache.org/docs/featureBehavior/10consumerretrypolicy/)、[best practices](https://rocketmq.apache.org/docs/bestPractice/01bestpractice/)、[rocketmq-client-go v2.1.2](https://github.com/apache/rocketmq-client-go/tree/v2.1.2)
-- [Docker Compose startup order](https://docs.docker.com/compose/how-tos/startup-order/)、[networking](https://docs.docker.com/compose/how-tos/networking/)、[compose run](https://docs.docker.com/reference/cli/docker/compose/run/)
+- Go： [Effective Go](https://go.dev/doc/effective_go)、[Code Review Comments](https://go.dev/wiki/CodeReviewComments)、[Race detector](https://go.dev/doc/articles/race_detector)、[net/http Go 1.27.2](https://pkg.go.dev/net/http@go1.27.2)。
+- MySQL 8.4： [InnoDB commit/rollback](https://dev.mysql.com/doc/refman/8.4/en/innodb-autocommit-commit-rollback.html)、[primary key](https://dev.mysql.com/doc/refman/8.4/en/constraint-primary-key.html)、[implicit commit](https://dev.mysql.com/doc/refman/8.4/en/implicit-commit.html)。
+- RocketMQ： [Consumer retry policy](https://rocketmq.apache.org/docs/featureBehavior/10consumerretrypolicy/)、[Best practices](https://rocketmq.apache.org/docs/bestPractice/01bestpractice/)、[rocketmq-client-go v2.1.2 source/examples](https://github.com/apache/rocketmq-client-go/tree/v2.1.2)。
+- HTTP 安全： [TLS 1.3 RFC 9846](https://www.rfc-editor.org/rfc/rfc9846.html)、[HTTP Message Signatures RFC 9421](https://www.rfc-editor.org/rfc/rfc9421.html)、[Content-Digest RFC 9530](https://www.rfc-editor.org/rfc/rfc9530.html)。
+- Docker： [Compose startup order](https://docs.docker.com/compose/how-tos/startup-order/)、[Compose networking](https://docs.docker.com/compose/how-tos/networking/)、[docker compose run](https://docs.docker.com/reference/cli/docker/compose/run/)。
 
-MySQL 的 snake_case、UTC `DATETIME(6)` 与二进制比较是项目一致性约定，依据本项目查询和幂等契约选择，并非 MySQL 官方要求的唯一命名或时间方案。
+MySQL 小写 snake_case、UTC DATETIME(6)、特定索引名和二进制 collation 是本项目为可读性、时区一致性和事件键语义选择的约定，不是 MySQL 官方唯一的命名或存储方式。RocketMQ 重试实际时间和 DLQ 行为以固定 Broker、SDK 和本仓库真实 Docker 验收为准；不根据 Java 配置名推导 Go SDK 能力。

@@ -1,0 +1,135 @@
+{
+  "scenarios": [
+    {
+      "details": {
+        "post_notifications_status": 401,
+        "tls12_rejected": true,
+        "tls13": true,
+        "unsigned_api_rejected": true
+      },
+      "name": "tls13_hmac_role_separation_and_no_http_submit",
+      "passed": true
+    },
+    {
+      "details": {
+        "body_format": "XML raw text",
+        "duplicate_sends": 2,
+        "event_id": "demo-fixed-18debc53f82795e0",
+        "http_calls": 1,
+        "notification_rows": 1,
+        "task_id": "1aa9cf4f-c0b0-4f9d-be2e-1cf6294d9407"
+      },
+      "name": "versioned_mq_ingress_and_demo_producer_duplicate",
+      "passed": true
+    },
+    {
+      "details": {
+        "http_calls": 1,
+        "task_id": "1aa9cf4f-c0b0-4f9d-be2e-1cf6294d9407"
+      },
+      "name": "same_event_id_with_changed_content_goes_to_dlq_without_overwrite",
+      "passed": true
+    },
+    {
+      "details": {
+        "body_format": "application/x-www-form-urlencoded",
+        "http_calls": 1,
+        "task_id": "5c44b988-8cdd-49b2-8375-acd642af566b"
+      },
+      "name": "form_body_and_content_type_are_preserved",
+      "passed": true
+    },
+    {
+      "details": {
+        "http_calls": 1,
+        "messages": 8,
+        "notification_rows": 1,
+        "task_id": "317e0203-ab9a-4ae5-b559-3966190a8619"
+      },
+      "name": "concurrent_duplicate_mq_events_share_one_task_and_http_call",
+      "passed": true
+    },
+    {
+      "details": {
+        "http_business_attempts": 2,
+        "mock_calls": 2,
+        "status": "DELIVERED",
+        "task_id": "4a7050cf-ee58-4eee-a0ee-7bfa63cc507b"
+      },
+      "name": "first_http_503_then_second_attempt_success",
+      "passed": true
+    },
+    {
+      "details": {
+        "http_business_attempts": 3,
+        "mock_calls": 3,
+        "task_id": "a12c2ea4-601f-4ee1-90ad-3d143b40f826",
+        "terminal": "FAILED"
+      },
+      "name": "three_503_calls_are_terminal_and_duplicate_safe",
+      "passed": true
+    },
+    {
+      "details": {
+        "final_status": "DELIVERED",
+        "http_calls": 1,
+        "mq_reconsume": 1,
+        "notification_rows": 1,
+        "task_id": "10faad70-00db-4dda-bf1b-0d5de4e5d106"
+      },
+      "name": "persisted_task_before_http_recovers_on_native_redelivery",
+      "passed": true
+    },
+    {
+      "details": {
+        "http_calls": 1,
+        "mq_reconsume": 1,
+        "task_id": "8d4820fc-5cb4-4319-b64f-bda8d3a14dbd"
+      },
+      "name": "notification_insert_failure_retries_before_http",
+      "passed": true
+    },
+    {
+      "details": {
+        "expired_status": "EXPIRED",
+        "fast_fail_calls": 0,
+        "manual_resolution_preserves_status": "FAILED",
+        "new_event_after_close": "DELIVERED",
+        "old_fast_fail_remains": "FAST_FAILED"
+      },
+      "name": "fast_fail_expiry_and_admin_resolution",
+      "passed": true
+    },
+    {
+      "details": {
+        "http_calls": 1,
+        "mq_reconsume": 1,
+        "status": "UNCERTAIN",
+        "task_id": "78858e5b-33bc-4e7a-a95f-f876adf4aedf"
+      },
+      "name": "external_success_then_result_write_failure_becomes_uncertain_without_resend",
+      "passed": true
+    },
+    {
+      "details": {
+        "conflict_reconsume": 3,
+        "conflicting_body_sent": false,
+        "execution_dlq_task_status": "PENDING",
+        "execution_error_reconsume": 3,
+        "invalid_json_reconsume": 3,
+        "unknown_version_reconsume": 3
+      },
+      "name": "invalid_version_conflict_and_execution_errors_reach_native_dlq",
+      "passed": true
+    },
+    {
+      "details": {
+        "distinct_clients": 2,
+        "distinct_task_ids": true,
+        "same_event_id": true
+      },
+      "name": "event_identity_is_scoped_by_trusted_client",
+      "passed": true
+    }
+  ]
+}

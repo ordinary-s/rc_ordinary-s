@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -19,7 +18,6 @@ import (
 	"github.com/ordinary-s/rc_ordinary-s/internal/delivery"
 	"github.com/ordinary-s/rc_ordinary-s/internal/mq"
 	"github.com/ordinary-s/rc_ordinary-s/internal/notification"
-	"github.com/ordinary-s/rc_ordinary-s/internal/outbox"
 	"github.com/ordinary-s/rc_ordinary-s/internal/store"
 )
 
@@ -45,27 +43,31 @@ func main() {
 		logger.Error("RocketMQ client initialization failed", "error", err)
 		os.Exit(1)
 	}
-	engine := delivery.New(cfg, repository, logger)
-	if err := mqClient.Start(runCtx, engine.Process); err != nil {
-		logger.Error("RocketMQ startup failed", "error", err)
-		os.Exit(1)
-	}
-	publisher := outbox.New(repository, mqClient, logger, cfg.OutboxPoll)
-	var workers sync.WaitGroup
-	workers.Add(1)
-	go func() {
-		defer workers.Done()
-		publisher.Run(runCtx)
-	}()
-
 	notificationService, err := notification.NewService(repository, cfg.AllowedTarget)
 	if err != nil {
 		logger.Error("destination allowlist configuration invalid", "error", err)
 		stop()
-		_ = mqClient.Shutdown()
 		os.Exit(1)
 	}
-	apiServer := api.New(cfg, repository, notificationService, logger, func(ctx context.Context) error {
+	engine := delivery.New(cfg, repository, logger)
+	process := func(ctx context.Context, event mq.IngressEvent, reconsume int) error {
+		expiresAt, err := time.Parse(time.RFC3339Nano, event.ExpiresAt)
+		if err != nil {
+			return &mq.ProtocolError{Reason: "MESSAGE_EXPIRY_INVALID"}
+		}
+		n, _, err := notificationService.Ingest(ctx, cfg.MQTrustedClientID, event.EventID, event.TraceID, expiresAt,
+			notification.Input{DestinationID: event.DestinationID, Method: event.Method, Headers: event.Headers, Body: event.Body},
+			cfg.MaxBodyBytes, cfg.MaxHeaderBytes, cfg.TaskTTL)
+		if err != nil {
+			return err
+		}
+		return engine.Process(ctx, n.ID, n.TraceID, reconsume)
+	}
+	if err := mqClient.Start(runCtx, process); err != nil {
+		logger.Error("RocketMQ consumer startup failed", "error", err)
+		os.Exit(1)
+	}
+	apiServer := api.New(cfg, repository, logger, func(ctx context.Context) error {
 		return mqClient.Ready(ctx, cfg.BrokerAddress)
 	})
 	certificate, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
@@ -101,7 +103,6 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Error("HTTP graceful shutdown failed", "error", err)
 	}
-	workers.Wait()
 	if err := mqClient.Shutdown(); err != nil {
 		logger.Error("RocketMQ shutdown failed", "error", err)
 	}

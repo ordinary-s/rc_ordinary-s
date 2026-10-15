@@ -1,0 +1,14 @@
+{
+  "scenarios": [
+    {
+      "details": {
+        "http_attempts": 1,
+        "mock_calls": 1,
+        "status": "UNCERTAIN",
+        "task_id": "033761de-2820-4828-ab7b-03f2969d4b5b"
+      },
+      "name": "sigterm_inflight_is_recovered_as_uncertain",
+      "passed": true
+    }
+  ]
+}

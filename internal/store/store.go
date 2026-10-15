@@ -87,21 +87,25 @@ func (s *Store) SeedDestination(ctx context.Context, id, targetURL string) error
 	return nil
 }
 
-func (s *Store) Accept(ctx context.Context, n domain.Notification) (domain.Notification, bool, error) {
+// Ingest atomically persists a source event's idempotency key and notification row.
+func (s *Store) Ingest(ctx context.Context, n domain.Notification) (domain.Notification, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return domain.Notification{}, false, fmt.Errorf("begin accept transaction: %w", err)
+		return domain.Notification{}, false, fmt.Errorf("begin ingest transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	_, err = tx.ExecContext(ctx, `INSERT INTO notification
-		(task_id, client_id, idempotency_key, request_fingerprint, destination_id, http_method, request_headers, request_body, trace_id, status, http_attempts, created_at, updated_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), ?)`,
-		n.ID, n.ClientID, n.IdempotencyKey, n.Fingerprint, n.DestinationID, n.Method, string(n.HeadersJSON), n.Body, n.TraceID, n.ExpiresAt.UTC())
+		(task_id, client_id, idempotency_key, source_event_id, request_fingerprint, destination_id, http_method, request_headers, request_body, trace_id, status, http_attempts, created_at, updated_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), ?)`,
+		n.ID, n.ClientID, n.IdempotencyKey, n.SourceEventID, n.Fingerprint, n.DestinationID, n.Method, string(n.HeadersJSON), n.Body, n.TraceID, n.ExpiresAt.UTC())
 	if err != nil {
 		var mysqlErr *mysql.MySQLError
 		if errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 {
 			_ = tx.Rollback()
-			existing, lookupErr := s.findByIdempotency(ctx, n.ClientID, n.IdempotencyKey)
+			existing, lookupErr := s.findBySourceEvent(ctx, n.ClientID, n.SourceEventID)
+			if errors.Is(lookupErr, ErrNotFound) {
+				return domain.Notification{}, false, ErrConflict
+			}
 			if lookupErr != nil {
 				return domain.Notification{}, false, lookupErr
 			}
@@ -110,15 +114,10 @@ func (s *Store) Accept(ctx context.Context, n domain.Notification) (domain.Notif
 			}
 			return existing, false, nil
 		}
-		return domain.Notification{}, false, fmt.Errorf("insert notification: %w", err)
-	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO outbox (event_id, task_id, trace_id, publish_state, next_attempt_at, created_at)
-		VALUES (?, ?, ?, 'PENDING', UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))`, n.ID, n.ID, n.TraceID)
-	if err != nil {
-		return domain.Notification{}, false, fmt.Errorf("insert outbox: %w", err)
+		return domain.Notification{}, false, fmt.Errorf("insert ingested notification: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return domain.Notification{}, false, fmt.Errorf("commit accept transaction: %w", err)
+		return domain.Notification{}, false, fmt.Errorf("commit ingest transaction: %w", err)
 	}
 	n.Status = domain.StatusPending
 	n.HTTPAttempts = 0
@@ -126,12 +125,12 @@ func (s *Store) Accept(ctx context.Context, n domain.Notification) (domain.Notif
 	return n, true, nil
 }
 
-func (s *Store) findByIdempotency(ctx context.Context, clientID, key string) (domain.Notification, error) {
+func (s *Store) findBySourceEvent(ctx context.Context, clientID, eventID string) (domain.Notification, error) {
 	var n domain.Notification
 	err := s.db.QueryRowContext(ctx, `SELECT task_id, client_id, idempotency_key, request_fingerprint, destination_id, http_method,
 		request_headers, request_body, trace_id, status, http_attempts, COALESCE(result_reason, ''), COALESCE(http_status, 0), created_at, expires_at, next_attempt_at,
 		COALESCE(resolved_by, ''), COALESCE(resolution, ''), resolved_at
-		FROM notification WHERE client_id = ? AND idempotency_key = ?`, clientID, key).Scan(
+		FROM notification WHERE client_id = ? AND source_event_id = ?`, clientID, eventID).Scan(
 		&n.ID, &n.ClientID, &n.IdempotencyKey, &n.Fingerprint, &n.DestinationID, &n.Method,
 		&n.HeadersJSON, &n.Body, &n.TraceID, &n.Status, &n.HTTPAttempts, &n.ResultReason, &n.HTTPStatus,
 		&n.CreatedAt, &n.ExpiresAt, &n.NextAttemptAt, &n.ResolvedBy, &n.Resolution, &n.ResolvedAt)
@@ -139,7 +138,7 @@ func (s *Store) findByIdempotency(ctx context.Context, clientID, key string) (do
 		return domain.Notification{}, ErrNotFound
 	}
 	if err != nil {
-		return domain.Notification{}, fmt.Errorf("read idempotent notification: %w", err)
+		return domain.Notification{}, fmt.Errorf("read source event notification: %w", err)
 	}
 	return n, nil
 }
@@ -372,53 +371,6 @@ func (s *Store) Resolve(ctx context.Context, taskID, actor, resolution string) (
 		return n, ErrNotEligible
 	}
 	return s.GetNotification(ctx, taskID)
-}
-
-type OutboxEvent struct {
-	EventID         string
-	TaskID          string
-	TraceID         string
-	PublishAttempts int
-}
-
-func (s *Store) PendingOutbox(ctx context.Context, limit int) ([]OutboxEvent, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT event_id, task_id, trace_id, publish_attempts FROM outbox
-		WHERE publish_state = 'PENDING' AND next_attempt_at <= UTC_TIMESTAMP(6)
-		ORDER BY next_attempt_at ASC, outbox_id ASC LIMIT ?`, limit)
-	if err != nil {
-		return nil, fmt.Errorf("scan outbox: %w", err)
-	}
-	defer rows.Close()
-	result := make([]OutboxEvent, 0, limit)
-	for rows.Next() {
-		var e OutboxEvent
-		if err := rows.Scan(&e.EventID, &e.TaskID, &e.TraceID, &e.PublishAttempts); err != nil {
-			return nil, fmt.Errorf("scan outbox row: %w", err)
-		}
-		result = append(result, e)
-	}
-	return result, rows.Err()
-}
-
-func (s *Store) MarkOutboxPublished(ctx context.Context, eventID string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE outbox SET publish_state = 'PUBLISHED', published_at = UTC_TIMESTAMP(6), last_error = NULL
-		WHERE event_id = ? AND publish_state = 'PENDING'`, eventID)
-	if err != nil {
-		return fmt.Errorf("mark outbox published: %w", err)
-	}
-	return nil
-}
-
-func (s *Store) DeferOutbox(ctx context.Context, eventID, summary string, delay time.Duration) error {
-	if len(summary) > 200 {
-		summary = summary[:200]
-	}
-	_, err := s.db.ExecContext(ctx, `UPDATE outbox SET next_attempt_at = ?, last_error = ?, publish_attempts = publish_attempts + 1
-		WHERE event_id = ? AND publish_state = 'PENDING'`, time.Now().UTC().Add(delay), summary, eventID)
-	if err != nil {
-		return fmt.Errorf("defer outbox event: %w", err)
-	}
-	return nil
 }
 
 func equalBytes(a, b []byte) bool {

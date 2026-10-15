@@ -24,6 +24,7 @@ type Notification struct {
 	ID             string          `json:"task_id"`
 	ClientID       string          `json:"client_id,omitempty"`
 	IdempotencyKey string          `json:"idempotency_key,omitempty"`
+	SourceEventID  string          `json:"-"`
 	Fingerprint    []byte          `json:"-"`
 	DestinationID  string          `json:"destination_id"`
 	Method         string          `json:"method"`

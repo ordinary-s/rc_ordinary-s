@@ -1,0 +1,72 @@
+gofmt: no differences
+== go_vet ==
+== go_mod_tidy_diff ==
+go: downloading github.com/stretchr/testify v1.10.0
+go: downloading github.com/smartystreets/goconvey v1.6.4
+go: downloading github.com/BurntSushi/toml v1.1.0
+go: downloading gopkg.in/yaml.v2 v2.4.0
+go: downloading github.com/smartystreets/assertions v0.0.0-20180927180507-b2de0cb4f26d
+go: downloading github.com/jtolds/gls v4.20.0+incompatible
+go: downloading gopkg.in/yaml.v3 v3.0.1
+go: downloading github.com/davecgh/go-spew v1.1.1
+go: downloading github.com/pmezard/go-difflib v1.0.0
+go: downloading github.com/gopherjs/gopherjs v0.0.0-20181017120253-0766667cb4d1
+== go_test ==
+?   	github.com/ordinary-s/rc_ordinary-s/cmd/demo-producer	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/cmd/devcert	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/cmd/healthcheck	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/cmd/migrate	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/cmd/mock-target	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/cmd/server	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/internal/api	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/internal/config	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/internal/delivery	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/internal/domain	[no test files]
+ok  	github.com/ordinary-s/rc_ordinary-s/internal/mq	0.004s
+ok  	github.com/ordinary-s/rc_ordinary-s/internal/notification	0.003s
+ok  	github.com/ordinary-s/rc_ordinary-s/internal/signature	0.003s
+?   	github.com/ordinary-s/rc_ordinary-s/internal/store	[no test files]
+== go_race ==
+?   	github.com/ordinary-s/rc_ordinary-s/cmd/demo-producer	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/cmd/devcert	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/cmd/healthcheck	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/cmd/migrate	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/cmd/mock-target	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/cmd/server	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/internal/api	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/internal/config	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/internal/delivery	[no test files]
+?   	github.com/ordinary-s/rc_ordinary-s/internal/domain	[no test files]
+ok  	github.com/ordinary-s/rc_ordinary-s/internal/mq	1.013s
+ok  	github.com/ordinary-s/rc_ordinary-s/internal/notification	1.010s
+ok  	github.com/ordinary-s/rc_ordinary-s/internal/signature	1.011s
+?   	github.com/ordinary-s/rc_ordinary-s/internal/store	[no test files]
+== integration_compile ==
+ok  	github.com/ordinary-s/rc_ordinary-s/tests/integration	0.004s [no tests to run]
+== real_integration ==
+=== RUN   TestEndToEndWithMySQLAndRocketMQ
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/TLS_HMAC_and_removed_HTTP_submit_route
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/MQ_event_dedupe,_payload_conflict,_raw_body_and_demo_producer
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/concurrent_duplicate_MQ_delivery_uses_one_task
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/transient_HTTP_failure_succeeds_on_the_second_business_attempt
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/three_HTTP_attempts_then_terminal_ACK
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/notification_commit_before_HTTP_and_native_recovery
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/notification_insert_failure_does_not_call_HTTP
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/fast_fail,_expiry_and_manual_resolution
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/result_write_failure_does_not_repeat_HTTP
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/protocol_errors_and_execution_error_reach_native_DLQ
+=== RUN   TestEndToEndWithMySQLAndRocketMQ/task_identity_is_scoped_by_trusted_client
+--- PASS: TestEndToEndWithMySQLAndRocketMQ (238.44s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/TLS_HMAC_and_removed_HTTP_submit_route (0.04s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/MQ_event_dedupe,_payload_conflict,_raw_body_and_demo_producer (40.71s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/concurrent_duplicate_MQ_delivery_uses_one_task (2.78s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/transient_HTTP_failure_succeeds_on_the_second_business_attempt (0.18s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/three_HTTP_attempts_then_terminal_ACK (1.95s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/notification_commit_before_HTTP_and_native_recovery (10.21s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/notification_insert_failure_does_not_call_HTTP (10.11s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/fast_fail,_expiry_and_manual_resolution (1.47s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/result_write_failure_does_not_repeat_HTTP (10.35s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/protocol_errors_and_execution_error_reach_native_DLQ (160.56s)
+    --- PASS: TestEndToEndWithMySQLAndRocketMQ/task_identity_is_scoped_by_trusted_client (0.03s)
+PASS
+ok  	github.com/ordinary-s/rc_ordinary-s/tests/integration	238.442s

@@ -95,7 +95,7 @@ func VerifyRequest(req *http.Request, keys map[string][]byte, now time.Time) (Cl
 	if definition.Label() != label || definition.Algorithm() != algorithm || !validKeyID(definition.KeyID()) {
 		return Claims{}, ErrInvalid
 	}
-	if !hasRequiredComponents(definition.Components(), req.Method == http.MethodPost && req.URL.Path == "/api/v1/notifications") {
+	if !hasRequiredComponents(definition.Components(), false) {
 		return Claims{}, ErrInvalid
 	}
 	created, hasCreated := definition.Created()

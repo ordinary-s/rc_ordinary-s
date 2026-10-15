@@ -85,8 +85,8 @@ services:
     entrypoint: ["sh", "/scripts/init-rocketmq.sh"]
     environment:
       NAMESRV_ADDR: namesrv:9876
-      ROCKETMQ_TOPIC: notification_delivery
-      ROCKETMQ_CONSUMER_GROUP: notification_delivery_workers
+      ROCKETMQ_TOPIC: notification_ingress_v1
+      ROCKETMQ_CONSUMER_GROUP: notification_ingress_workers_v1
     volumes:
       - ./scripts/init-rocketmq.sh:/scripts/init-rocketmq.sh:ro
     depends_on:
@@ -136,12 +136,12 @@ services:
       DB_DSN: "notification_app:${MYSQL_APP_PASSWORD:-notification-app-local}@tcp(mysql:3306)/notifications?parseTime=true&loc=UTC&charset=utf8mb4"
       ROCKETMQ_NAMESRV: namesrv:9876
       ROCKETMQ_BROKER_ADDR: broker:10911
-      ROCKETMQ_TOPIC: notification_delivery
-      ROCKETMQ_PRODUCER_GROUP: notification_outbox_publisher
-      ROCKETMQ_CONSUMER_GROUP: notification_delivery_workers
+      ROCKETMQ_TOPIC: notification_ingress_v1
+      ROCKETMQ_CONSUMER_GROUP: notification_ingress_workers_v1
       MQ_MAX_RECONSUME: ${MQ_MAX_RECONSUME:-8}
       ROCKETMQ_GO_LOG_LEVEL: error
-      CLIENT_ID: demo-client
+      CLIENT_ID: ${MQ_TRUSTED_CLIENT_ID:-demo-upstream}
+      MQ_TRUSTED_CLIENT_ID: ${MQ_TRUSTED_CLIENT_ID:-demo-upstream}
       CLIENT_TOKEN: ${CLIENT_TOKEN:-demo-client-token}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-demo-admin-token}
       ADMIN_ACTOR: ${ADMIN_ACTOR:-local-admin}
@@ -158,7 +158,6 @@ services:
       HTTP_TIMEOUT: 10s
       HTTP_BACKOFFS: 10s,20s
       TASK_TTL: 30m
-      OUTBOX_POLL: 1s
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-8443}:8443"
     volumes:
@@ -192,6 +191,8 @@ services:
     profiles: ["verify"]
     environment:
       TEST_API_URL: https://app:8443
+      TEST_CLIENT_ID: ${MQ_TRUSTED_CLIENT_ID:-demo-upstream}
+      TEST_CONSUMER_GROUP: notification_ingress_workers_v1
       TEST_CLIENT_TOKEN: ${CLIENT_TOKEN:-demo-client-token}
       TEST_ADMIN_TOKEN: ${ADMIN_TOKEN:-demo-admin-token}
       TEST_ADMIN_ACTOR: ${ADMIN_ACTOR:-local-admin}
@@ -203,7 +204,8 @@ services:
       TEST_DB_DSN: "root:${MYSQL_ROOT_PASSWORD:-notification-root-local}@tcp(mysql:3306)/notifications?parseTime=true&loc=UTC&charset=utf8mb4"
       TEST_MOCK_URL: http://mock-target:8090
       ROCKETMQ_NAMESRV: namesrv:9876
-      ROCKETMQ_TOPIC: notification_delivery
+      ROCKETMQ_TOPIC: notification_ingress_v1
+      ROCKETMQ_GO_LOG_LEVEL: error
       TEST_REPORT: /reports/integration.json
       TEST_CONTROL_DIR: /reports
     volumes:

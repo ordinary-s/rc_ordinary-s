@@ -20,7 +20,6 @@ import (
 
 	"github.com/ordinary-s/rc_ordinary-s/internal/config"
 	"github.com/ordinary-s/rc_ordinary-s/internal/domain"
-	"github.com/ordinary-s/rc_ordinary-s/internal/mq"
 	"github.com/ordinary-s/rc_ordinary-s/internal/store"
 )
 
@@ -34,7 +33,7 @@ type Engine struct {
 }
 
 type taskLock struct {
-	mu   sync.Mutex
+	gate chan struct{}
 	refs int
 }
 
@@ -67,20 +66,20 @@ func New(cfg config.Config, s *store.Store, logger *slog.Logger) *Engine {
 	}
 }
 
-func (e *Engine) Process(ctx context.Context, event mq.Event, reconsume int) error {
-	lock, release := e.lockTask(event.TaskID)
+func (e *Engine) Process(ctx context.Context, taskID, traceID string, reconsume int) error {
+	release, err := e.lockTask(ctx, taskID)
+	if err != nil {
+		return e.executionError(taskID, traceID, reconsume, time.Now(), err)
+	}
 	defer release()
-	lock.mu.Lock()
-	defer lock.mu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, e.cfg.DeliveryBudget)
 	defer cancel()
 	started := time.Now()
 	var n domain.Notification
-	var err error
 	for {
-		n, err = e.store.GetNotification(ctx, event.TaskID)
+		n, err = e.store.GetNotification(ctx, taskID)
 		if err != nil {
-			return e.executionError(event, reconsume, started, err, n)
+			return e.executionError(taskID, traceID, reconsume, started, err, n)
 		}
 		if domain.IsTerminal(n.Status) {
 			e.logResult(n, reconsume, started, n.Status, "TERMINAL_DURING_PROCESSING")
@@ -89,12 +88,12 @@ func (e *Engine) Process(ctx context.Context, event mq.Event, reconsume int) err
 		if n.Status == domain.StatusProcessing {
 			attempts, err := e.store.ListAttempts(ctx, n.ID)
 			if err != nil {
-				return e.executionError(event, reconsume, started, err, n)
+				return e.executionError(taskID, traceID, reconsume, started, err, n)
 			}
 			for _, attempt := range attempts {
 				if attempt.State == domain.AttemptStarted {
 					if err := e.store.MarkInFlightUncertain(ctx, n.ID); err != nil {
-						return e.executionError(event, reconsume, started, err, n)
+						return e.executionError(taskID, traceID, reconsume, started, err, n)
 					}
 					n.Status = domain.StatusUncertain
 					e.logResult(n, reconsume, started, domain.StatusUncertain, "PROCESS_INTERRUPTED_RESULT_UNKNOWN")
@@ -104,7 +103,7 @@ func (e *Engine) Process(ctx context.Context, event mq.Event, reconsume int) err
 		}
 		if !time.Now().UTC().Before(n.ExpiresAt) {
 			if err := e.store.FinishWithoutAttempt(ctx, n.ID, domain.StatusExpired, "TASK_EXPIRED"); err != nil {
-				return e.executionError(event, reconsume, started, err, n)
+				return e.executionError(taskID, traceID, reconsume, started, err, n)
 			}
 			n.Status = domain.StatusExpired
 			e.logResult(n, reconsume, started, n.Status, "TASK_EXPIRED")
@@ -112,11 +111,11 @@ func (e *Engine) Process(ctx context.Context, event mq.Event, reconsume int) err
 		}
 		destination, err := e.store.GetDestination(ctx, n.DestinationID)
 		if err != nil {
-			return e.executionError(event, reconsume, started, err, n)
+			return e.executionError(taskID, traceID, reconsume, started, err, n)
 		}
 		if destination.FastFailEnabled {
 			if err := e.store.FinishWithoutAttempt(ctx, n.ID, domain.StatusFastFailed, "DESTINATION_FAST_FAIL_ENABLED"); err != nil {
-				return e.executionError(event, reconsume, started, err)
+				return e.executionError(taskID, traceID, reconsume, started, err)
 			}
 			n.Status = domain.StatusFastFailed
 			e.logResult(n, reconsume, started, n.Status, "DESTINATION_FAST_FAIL_ENABLED")
@@ -129,7 +128,7 @@ func (e *Engine) Process(ctx context.Context, event mq.Event, reconsume int) err
 				if !timer.Stop() {
 					<-timer.C
 				}
-				return e.executionError(event, reconsume, started, ctx.Err(), n)
+				return e.executionError(taskID, traceID, reconsume, started, ctx.Err(), n)
 			case <-timer.C:
 				continue
 			}
@@ -137,7 +136,7 @@ func (e *Engine) Process(ctx context.Context, event mq.Event, reconsume int) err
 		attemptNo := n.HTTPAttempts + 1
 		if attemptNo > 3 {
 			if err := e.store.FinishWithoutAttempt(ctx, n.ID, domain.StatusFailed, "HTTP_ATTEMPTS_EXHAUSTED"); err != nil {
-				return e.executionError(event, reconsume, started, err, n)
+				return e.executionError(taskID, traceID, reconsume, started, err, n)
 			}
 			n.Status = domain.StatusFailed
 			e.logResult(n, reconsume, started, n.Status, "HTTP_ATTEMPTS_EXHAUSTED")
@@ -152,7 +151,7 @@ func (e *Engine) Process(ctx context.Context, event mq.Event, reconsume int) err
 			}
 			e.logger.Warn("outbound request preparation failed", "trace_id", n.TraceID, "task_id", n.ID, "destination_id", n.DestinationID, "code", reason, "error_type", fmt.Sprintf("%T", err))
 			if saveErr := e.store.FinishWithoutAttempt(ctx, n.ID, domain.StatusFailed, reason); saveErr != nil {
-				return e.executionError(event, reconsume, started, errors.Join(err, saveErr), n)
+				return e.executionError(taskID, traceID, reconsume, started, errors.Join(err, saveErr), n)
 			}
 			n.Status = domain.StatusFailed
 			e.logResult(n, reconsume, started, n.Status, reason)
@@ -160,18 +159,18 @@ func (e *Engine) Process(ctx context.Context, event mq.Event, reconsume int) err
 		}
 		if err := e.store.StartAttempt(ctx, n.ID, attemptNo); err != nil {
 			cancel()
-			return e.executionError(event, reconsume, started, err, n)
+			return e.executionError(taskID, traceID, reconsume, started, err, n)
 		}
 		n.HTTPAttempts = attemptNo
 		response, sendErr := e.client.Do(request)
 		if sendErr != nil {
 			cancel()
 			if ctx.Err() != nil {
-				return e.executionError(event, reconsume, started, ctx.Err(), n)
+				return e.executionError(taskID, traceID, reconsume, started, ctx.Err(), n)
 			}
 			reason := "HTTP_RESULT_UNKNOWN"
 			if saveErr := e.completeAttempt(ctx, n.ID, attemptNo, 0, domain.AttemptUnknown, domain.StatusUncertain, reason, nil); saveErr != nil {
-				return e.executionError(event, reconsume, started, errors.Join(sendErr, saveErr), n)
+				return e.executionError(taskID, traceID, reconsume, started, errors.Join(sendErr, saveErr), n)
 			}
 			n.HTTPAttempts, n.Status = attemptNo, domain.StatusUncertain
 			e.logResult(n, reconsume, started, n.Status, reason)
@@ -181,11 +180,11 @@ func (e *Engine) Process(ctx context.Context, event mq.Event, reconsume int) err
 		retryAfter, bodyErr := responseResult(response)
 		cancel()
 		if bodyErr != nil {
-			return e.executionError(event, reconsume, started, bodyErr, n)
+			return e.executionError(taskID, traceID, reconsume, started, bodyErr, n)
 		}
 		if httpStatus >= 200 && httpStatus < 300 {
 			if err := e.completeAttempt(ctx, n.ID, attemptNo, httpStatus, domain.AttemptSucceeded, domain.StatusDelivered, "HTTP_2XX", nil); err != nil {
-				return e.executionError(event, reconsume, started, err, n)
+				return e.executionError(taskID, traceID, reconsume, started, err, n)
 			}
 			n.HTTPAttempts, n.HTTPStatus, n.Status = attemptNo, httpStatus, domain.StatusDelivered
 			e.logResult(n, reconsume, started, n.Status, "HTTP_2XX")
@@ -195,7 +194,7 @@ func (e *Engine) Process(ctx context.Context, event mq.Event, reconsume int) err
 		retryable := httpStatus == http.StatusTooManyRequests || httpStatus >= 500
 		if !retryable {
 			if err := e.completeAttempt(ctx, n.ID, attemptNo, httpStatus, domain.AttemptFailed, domain.StatusFailed, "HTTP_PERMANENT_FAILURE", nil); err != nil {
-				return e.executionError(event, reconsume, started, err, n)
+				return e.executionError(taskID, traceID, reconsume, started, err, n)
 			}
 			n.HTTPAttempts, n.HTTPStatus, n.Status = attemptNo, httpStatus, domain.StatusFailed
 			e.logResult(n, reconsume, started, n.Status, "HTTP_PERMANENT_FAILURE")
@@ -203,7 +202,7 @@ func (e *Engine) Process(ctx context.Context, event mq.Event, reconsume int) err
 		}
 		if attemptNo == 3 {
 			if err := e.completeAttempt(ctx, n.ID, attemptNo, httpStatus, domain.AttemptFailed, domain.StatusFailed, "HTTP_ATTEMPTS_EXHAUSTED", nil); err != nil {
-				return e.executionError(event, reconsume, started, err, n)
+				return e.executionError(taskID, traceID, reconsume, started, err, n)
 			}
 			n.HTTPAttempts, n.HTTPStatus, n.Status = attemptNo, httpStatus, domain.StatusFailed
 			e.logResult(n, reconsume, started, n.Status, "HTTP_ATTEMPTS_EXHAUSTED")
@@ -222,7 +221,7 @@ func (e *Engine) Process(ctx context.Context, event mq.Event, reconsume int) err
 		}
 		if reason != "" {
 			if err := e.completeAttempt(ctx, n.ID, attemptNo, httpStatus, domain.AttemptFailed, domain.StatusFailed, reason, nil); err != nil {
-				return e.executionError(event, reconsume, started, err, n)
+				return e.executionError(taskID, traceID, reconsume, started, err, n)
 			}
 			n.HTTPStatus, n.Status, n.ResultReason = httpStatus, domain.StatusFailed, reason
 			e.logResult(n, reconsume, started, n.Status, reason)
@@ -230,7 +229,7 @@ func (e *Engine) Process(ctx context.Context, event mq.Event, reconsume int) err
 		}
 		nextAttemptAt := time.Now().UTC().Add(delay).Truncate(time.Microsecond)
 		if err := e.completeAttempt(ctx, n.ID, attemptNo, httpStatus, domain.AttemptFailed, domain.StatusProcessing, fmt.Sprintf("HTTP_%d", httpStatus), &nextAttemptAt); err != nil {
-			return e.executionError(event, reconsume, started, err, n)
+			return e.executionError(taskID, traceID, reconsume, started, err, n)
 		}
 		// The due time is persisted before waiting so MQ redelivery cannot bypass it.
 	}
@@ -324,16 +323,17 @@ func responseResult(response *http.Response) (time.Duration, error) {
 	return 0, nil
 }
 
-func (e *Engine) lockTask(taskID string) (*taskLock, func()) {
+func (e *Engine) lockTask(ctx context.Context, taskID string) (func(), error) {
 	e.mu.Lock()
 	lock := e.taskLocks[taskID]
 	if lock == nil {
-		lock = &taskLock{}
+		lock = &taskLock{gate: make(chan struct{}, 1)}
+		lock.gate <- struct{}{}
 		e.taskLocks[taskID] = lock
 	}
 	lock.refs++
 	e.mu.Unlock()
-	return lock, func() {
+	dropRef := func() {
 		e.mu.Lock()
 		lock.refs--
 		if lock.refs == 0 {
@@ -341,16 +341,32 @@ func (e *Engine) lockTask(taskID string) (*taskLock, func()) {
 		}
 		e.mu.Unlock()
 	}
+	select {
+	case <-ctx.Done():
+		dropRef()
+		return nil, ctx.Err()
+	default:
+	}
+	select {
+	case <-lock.gate:
+		return func() {
+			lock.gate <- struct{}{}
+			dropRef()
+		}, nil
+	case <-ctx.Done():
+		dropRef()
+		return nil, ctx.Err()
+	}
 }
 
-func (e *Engine) executionError(event mq.Event, reconsume int, started time.Time, err error, known ...domain.Notification) error {
+func (e *Engine) executionError(taskID, traceID string, reconsume int, started time.Time, err error, known ...domain.Notification) error {
 	destinationID, attempts := "unknown", "unknown"
 	if len(known) > 0 && known[0].ID != "" {
 		destinationID = known[0].DestinationID
 		attempts = fmt.Sprint(known[0].HTTPAttempts)
 	}
 	e.logger.Error("notification execution incomplete",
-		"trace_id", event.TraceID, "task_id", event.TaskID, "destination_id", destinationID,
+		"trace_id", traceID, "task_id", taskID, "destination_id", destinationID,
 		"http_attempts", attempts, "mq_reconsume", reconsume, "result", "EXECUTION_ERROR",
 		"code", "EXECUTION_ERROR", "cost_ms", time.Since(started).Milliseconds(), "error_type", fmt.Sprintf("%T", err))
 	return err

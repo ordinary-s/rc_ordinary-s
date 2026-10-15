@@ -1,131 +1,21 @@
 # 设计决策与取舍
 
-本项目的重点是让受理、消息交接和 HTTP 投递之间的责任清楚：请求已经落库，并不代表外部机构已经处理；消息能够重投，也不代表可以无限重复 HTTP。以下记录主要选择、替代方案和相应代价。
-
-完整流程与接口见[设计文档](design.md)，能力边界见[已知限制](implementation-review.md)，运行依据见[验收记录](verification.md)。
-
-## D01：使用 Go，以显式组合组织服务
-
-项目采用 Go 标准库、显式依赖和函数组合组织 API、事务与后台任务。Java/Spring 同样能够实现这些职责，但当前范围不需要再引入 AOP 或注解代理来管理幂等和事务。
-
-这样可以沿代码直接查看依赖、取消和错误传播，单应用部署也较直观。代价是 context、事务和错误处理需要显式编排，语言本身不会自动带来更高可靠性。
-
-当前已实现，入口见 [server](../cmd/server/main.go)，主要职责分布在 `internal/` 各包。
-
-## D02：MySQL/InnoDB 已满足当前数据需求
-
-任务、幂等依据、尝试结果和 Outbox 需要本地事务、唯一约束及常规索引。MySQL/InnoDB 已能提供这些能力，当前没有依赖 PostgreSQL 专属功能的需求，因此没有为数据库切换增加额外成本。
-
-选择 MySQL 后，仍需正确处理排序规则、UTC 时间、查询计划和迁移。数据库品牌不能代替正确性验证，DDL 隐式提交也不能按普通事务回滚处理。PostgreSQL 是可行替代，但需要重新适配并验证 SQL、驱动与迁移。
-
-当前已实现，见 [migration 001](../migrations/001_initial.sql)、[migration 002](../migrations/002_notification_retry_due.sql) 与 [Store](../internal/store/store.go)。归档验收覆盖 UTC、大小写敏感幂等和 Outbox 查询计划。
-
-## D03：使用 RocketMQ 作为唯一消息分发路径
-
-数据库保存任务与发布责任，RocketMQ 负责消息分发和消费异常恢复。RabbitMQ 是比较过的替代方案，没有与 RocketMQ 同时部署；普通内存事件也不承担进程退出后的可靠交接。
-
-保留一种 MQ 可以减少配置、发送与恢复路径的维护成本。相应代价是需要理解 NameServer、Broker 通告地址、Topic/Group，以及固定 Go SDK 的确认、超时和重试行为。RabbitMQ 的路由与确认 API 不能直接套用到这里。
-
-当前已实现，见 [MQ 客户端](../internal/mq/rocket.go) 与 [Compose](../compose.yaml)。SDK 相容性见[完整设计](design.md)，验证环境中的组件版本见[验收记录](verification.md)。
-
-## D04：保留 Outbox，但只让它负责发布补偿
-
-先提交数据库再发送 MQ，进程可能在两步之间退出；先发送 MQ 再提交数据库，消费者又可能读不到已提交任务。项目因此将通知与首次 Outbox 放在同一事务中，提交后由 Go 发布器扫描到期 PENDING 记录，发送确认后再标记 PUBLISHED。
-
-Outbox 不扫描所有 HTTP 失败任务，也不为业务重试创建新的发布责任。这样既保留受理后的恢复依据，也避免它与 Consumer 的 HTTP 重试争夺调度职责。
-
-代价是允许重复消息：Broker 已接收而本地标记尚未完成时，同一事件可能再次发布。发布器为未确认发送和标记未完成设置退避，消费者依据持久化状态处理重复；如果数据库连退避时间都无法保存，下一轮扫描仍可能重复发送。
-
-当前已实现，见 [Publisher](../internal/outbox/publisher.go) 与 [Store](../internal/store/store.go)。真实 MySQL 注入场景验证了发布标记未完成后的补发，以及重复消息未增加 HTTP 调用，详见[验收记录](verification.md)。
-
-## D05：单条回调比批次部分失败协调更适合 MVP
-
-项目采用单条消费回调和有界并发。每条回调只需判断一个任务是否可靠完成，避免整批确认、失败单条重发和计数之间的额外协调。
-
-单条回调不等于整个系统串行：独立任务仍然并发执行，SDK 的消费并发数有上限。放弃批处理可能损失部分吞吐，但当前没有压测证据证明这项收益值得引入更复杂的部分成功状态。
-
-当前已实现，见 [MQ 客户端](../internal/mq/rocket.go)：消费批量和拉取批量设为 1，消费 goroutine 数可配置，回调同时检查消息数是否符合约定。
-
-## D06：每条任务最多三次 HTTP 尝试，包含首次
-
-三次是总业务预算，包含首次和最多两次重试。可重试的 429/5xx 在时间允许时继续；成功、永久失败、到期、快速失败或结果不明都可以提前结束。第三次仍失败时保存 FAILED，MQ 重投不会再给予三次新机会。
-
-默认两段退避为 10 秒、20 秒并加小幅抖动。有效 Retry-After 与本地退避取较大值，还要检查任务有效期和剩余处理预算。尝试结果与下一次到期时间同事务保存，使进程恢复有明确的时间依据。
-
-这限制了调用成本，也意味着无法承诺每条通知最终送达。消费内等待会占用 Worker。持久化次数统计的是应用启动的业务尝试；Go Transport 可能对部分请求透明重试，因此业务次数与所有故障下的物理网络发送次数需要区分。
-
-当前已实现，见 [Engine](../internal/delivery/engine.go)、[配置](../internal/config/config.go) 与 Store 的尝试更新。三次 503、重复终态和持久化退避的归档场景见[验收记录](verification.md)。
-
-## D07：业务结果、HTTP 重试与结果保存分别处理
-
-DELIVERED、FAILED、FAST_FAILED、EXPIRED、UNCERTAIN 都是已完成的业务结果，可靠保存后结束消费。读取任务、保存结果等步骤尚未完成时，才返回执行异常并由 MQ 恢复。
-
-HTTP 已成功而数据库暂时不可写时，优先重试保存已有结果：最多三次写入，两段等待为 50ms、100ms，不再次调用 HTTP。重投恢复若发现残留 STARTED 尝试，则将其记为 UNKNOWN，任务进入 UNCERTAIN，由人工核对外部事实。
-
-这个选择避免短暂写库问题直接重复产生外部副作用，代价是保守处理可能放弃原本可安全重发的机会。数据库无法证明远端是否执行时，任务会保留不确定性，而不会被自动判定成功。
-
-当前已实现，见 [Engine](../internal/delivery/engine.go) 的 `Process`、`completeAttempt` 和 [Store](../internal/store/store.go) 的结果保存、未完成尝试处理。真实数据库注入与 SIGTERM 场景见[验收记录](verification.md)。
-
-## D08：机构快速失败采用人工控制的终止策略
-
-机构长期不可用时，管理员开启 `fast_fail_enabled`。发送前读到开关的任务保存 FAST_FAILED 并结束消费，不等待机构恢复。管理员确认恢复后关闭开关，只允许仍有发送资格的任务继续，旧终态不复活。单条任务三次失败只影响该任务，不自动打开机构开关。
-
-与暂停后补送、自动熔断和半开探测相比，人工终止策略减少了状态与调度复杂度。代价是恢复依赖人工，部分已受理任务不会补送；开关也不能撤销在途请求，读取配置与实际发送之间仍有竞争窗口。
-
-当前已实现，见 [API](../internal/api/server.go)、Store 与 Engine。操作身份由服务器的 `ADMIN_ACTOR` 配置确定；目前只有单个配置管理员，表中保留最新操作信息，没有完整的多人身份管理或不可变审计流水。
-
-## D09：执行异常只使用 RocketMQ 原生重试与 DLQ
-
-Consumer 正常完成时返回 `ConsumeSuccess`，执行未可靠完成时返回 `ConsumeRetryLater`。原生有限重试和 DLQ 承担异常恢复，HTTP 次数仍由任务表独立管理。
-
-没有再用 Properties 维护一套应用异常次数，也没有建立另一条手工重发队列。这减少了原消息确认与新消息发送之间的协调，代价是异常恢复的时间和上限受所选 SDK、消费模式与 Broker 配置约束。
-
-当前已实现，见 [MQ 客户端](../internal/mq/rocket.go)。原生重试适用于处理未完成，不能用来持续重发已终止的 HTTP 任务或模拟机构限流。DLQ 表示执行异常耗尽，与普通三次 HTTP 失败不同；真实重投与 DLQ 场景见[验收记录](verification.md)。
-
-## D10：入口、消费和下游分别承担幂等责任
-
-入口使用 `(client_id, idempotency_key)` 唯一约束和请求指纹：同键同内容复用任务，不同内容返回冲突。消费阶段读取持久化终态、尝试和时间预算，同一进程内按 task ID 保护并发执行。外发 HTTP 则使用稳定 task ID 作为幂等键。
-
-这三层分别处理重复提交、重复消息和外部副作用。下游只有真正支持去重，幂等 Header 才有业务效果。本地唯一约束无法证明外部恰好一次，单实例内存锁也不能代替跨实例执行权。
-
-入口与消费保护已经实现，见 [受理服务](../internal/notification/accept.go)、[Store](../internal/store/store.go) 和 Engine。后续数据归档还需分别定义正文与幂等依据的保留期，避免清理正文时意外取消去重契约。
-
-## D11：用简短日志关联任务，用数据库保存处理事实
-
-项目使用 `log/slog` 输出受理、消费结果、必要异常和管理员操作。trace/task 通过数据库及 MQ 小消息传递，日志字段在每次调用时显式传入，不把当前请求写入共享可变 logger。
-
-详细处理依据保存在任务与尝试表。日志不输出正文、完整 Header、Token、Cookie 或外部响应全文，也没有增加无界日志队列或独立日志平台。这样可以控制日志量与敏感信息暴露，代价是排查需要结合数据库记录，不能仅靠一段日志还原所有过程。
-
-关键链路已经实现并有并发配对、敏感内容扫描验证。部分异常路径字段不完整，启动、迁移及 SDK 错误的脱敏还需进一步覆盖，见[已知限制](implementation-review.md)。
-
-## D12：先提供人工核对，不默认建设重放平台
-
-当前提供任务查询、失败或待核对终态的结论记录，以及独立的 `mqadmin` DLQ 检索。resolve 保存结论、操作人和时间，保持原业务状态，不清空次数、不创建 Outbox，也不重新调用 HTTP。
-
-这一范围保留了必要的处理依据，省去了授权新执行、预算重置和重放审批的状态机。代价是负责人仍需核对外部结果；DLQ 不自动同步到任务表。若死信对应任务仍为 PENDING/PROCESSING，或根本没有任务记录，现有 resolve 无法为其结案，需要另存受控处置记录。
-
-当前为部分实现，接口与操作方法见 [README](../README.md)，具体边界见[已知限制](implementation-review.md)。数据库写入异常返回 500，不符合处置条件返回 409；这两种错误与人工确认外部结果是不同问题。
-
-## D13：限流、分组和独立扩容跟随实际瓶颈
-
-当前只有全局消费并发与 HTTP 连接资源上限。后续先按调用方限制入口，再按机构或共享账号用令牌桶控制发送速率，并设置在途请求数上限；首次与重试共用配额。
-
-当不同机构互相影响时，再按机构、业务重要性或共享账号划分 Topic/队列、Worker 与连接资源。只拆队列但共用同一执行池，慢机构仍会占用其他任务的容量。多实例还需要解决跨实例执行权和机构合计额度，不能让配额随副本数倍增。
-
-这些能力尚未实现。优先观察积压年龄、机构 429/延迟、连接池等待及本机资源利用率：下游还有额度且本系统饱和时扩容；下游额度已满时，应限制入口、削峰或协商时效。自动熔断也留待真实运营需求，不能改变旧终态不复活的契约。详细路线见[题目答复第四部分](assignment-answers.md)。
-
-## D14：固定工具链，用真实依赖验证可靠性
-
-项目使用固定版本和 digest 的镜像，通过 Docker Compose 运行应用、MySQL、RocketMQ 与可计数 mock target。Go 格式、静态检查、普通测试和 race 也在锁定工具链中执行，减少宿主环境差异。
-
-端到端验证同时观察数据库状态、消息重投和 HTTP 次数，才能判断责任是否正确交接。容器启动和单元测试各自有用，但无法单独回答 Outbox 补偿、重复消息或进程中断后的实际行为。
-
-验收入口已经实现，见 [PowerShell 脚本](../scripts/verify-docker.ps1) 和 [Bash 脚本](../scripts/verify-docker.sh)。归档通过记录的日期、环境、命令和场景见[验收记录](verification.md)。这些场景验证的是当前单实例开发拓扑，生产容量、HA 和更完整的网络故障组合仍需另行验证。
-
-## D15：TLS 1.3 保护传输，HMAC 签名验证 API 请求
-
-API 服务最低使用 TLS 1.3；除健康探针外，`/api/*` 同时要求 Bearer token 和 RFC 9421 `hmac-sha256` 签名，使用 RFC 9530 `Content-Digest`，把方法、authority、目标 URI、路径和认证信息纳入签名，提交通知时再覆盖幂等键。签名带有效期和 nonce，已使用 nonce 存入 MySQL 防止重放。客户端与管理员使用不同密钥身份。
-
-用户讨论后选择了“先保护传输、按需加请求签名”这两个方面。没有增加自定义请求体加密：它不能替代 TLS，还会引入密钥分发和轮换负担；HMAC 也不提供保密性。生产可使用受控 TLS 网关，但要限制应用入口，并保证被签名的外部请求目标信息可被可信地校验。当前 Compose 的证书和 HMAC 值仅是本地演示配置。
-
-当前已实现，见 [TLS 启动](../cmd/server/main.go)、[签名策略](../internal/signature/signature.go)、[nonce migration](../migrations/003_api_signature_nonce.sql)、[Compose](../compose.yaml) 和 demo client。真实 TLS1.3 协商、TLS1.2 拒绝、无签名/篡改/过期/重放请求拒绝由 Docker E2E 验证；最新结果见[验收报告](verification.md)。
+本表记录需求讨论后采用的最终方案，以及早期建议被替换或暂缓的内容。实现证据链接到当前源码/Compose；真实 Docker 场景证据和运行 SHA 见[验收记录](verification.md)。
+
+| 编号 / 议题 | 最终决定 | 被替代或推迟的做法 | 理由与代价 | 实现或验证证据 |
+|---|---|---|---|---|
+| D01 Java/Spring 与 Go | 使用 Go 标准库、显式依赖与函数组合 | 不采用 AOP 注解式事务/幂等层 | 状态、取消和错误边界直观；代价是需要显式编排。 | [server](../cmd/server/main.go)、[internal](../internal/)；Docker 中 gofmt/vet/test/race |
+| D02 PostgreSQL 与 MySQL | 使用 MySQL/InnoDB 保存通知、尝试、目标和核对结果 | 不为 PostgreSQL 专属能力引入额外切换 | 当前没有 PostgreSQL 专属需求；仍需自行验证 collation、UTC 和迁移。 | [migration](../migrations/001_initial.sql)、[Store](../internal/store/store.go)、真实 MySQL E2E |
+| D03 事件路径 / Spring 事件 / RabbitMQ / RocketMQ | 新版由上游直接向 RocketMQ 发布完整事件，本服务只有消费者 | 移除本服务 HTTP 通知提交及内部 Outbox Publisher；RabbitMQ/Spring 事件路线不保留 | 责任边界移到上游业务 Outbox；代价是本服务不能替上游修复业务库到 MQ 的双写。 | [MQ consumer](../internal/mq/rocket.go)、[server callback](../cmd/server/main.go)、[Compose](../compose.yaml) |
+| D04 发布可靠交接 | 上游用自己的事务 Outbox 或等价持久交接；本服务消费已发布事件并先落库 | 本服务定时扫描自己的 Outbox 并向 MQ 发布 | 避免重复建设发送路径；上游必须确保稳定 event_id 与业务提交一致。 | [event ingest](../internal/notification/accept.go)、[Store.Ingest](../internal/store/store.go)、直接 MQ E2E |
+| D05 批量确认与单条回调 | PushConsumer 单条回调、单条拉取、有界并发 | 放弃整批确认后自行重发部分失败消息的协调逻辑 | 责任确认对应一条消息；代价是没有批处理吞吐优化。 | [MQ client](../internal/mq/rocket.go)、并发重复投递 E2E |
+| D06 HTTP 次数口径 | 最多三次业务尝试，首次加两次重试 | 纠正首次加三次重试（总共四次） | 业务预算有唯一口径；Transport 底层对部分网络错误可能内部重试。 | [Delivery Engine](../internal/delivery/engine.go)、503 mock 计数 E2E |
+| D07 业务终态与执行异常 | 已保存 FAILED/FAST_FAILED/EXPIRED/UNCERTAIN/DELIVERED 均 ACK；仅执行未完成交 MQ | 不因 HTTP 最终失败再发新业务消息；不把任意非空 error 等同需重发 HTTP | 避免无界业务重复；代价是业务失败需查询或人工判断。 | [callback](../internal/mq/rocket.go)、[Engine](../internal/delivery/engine.go)、3x503/DB retry E2E |
+| D08 机构快速失败 | 管理员开启开关后，任务保存 FAST_FAILED 并完成；关闭只影响新任务 | 不把任务暂停排队等恢复，不自动复活旧终态 | 状态和责任清楚；代价是旧失败须人工处置且依赖人工恢复判断。 | [admin API](../internal/api/server.go)、Store、fast-fail E2E |
+| D09 MQ 异常重试 | 使用 RocketMQ 原生有限重试和 DLQ | 移除自定义 Properties 次数驱动的二次手工发布 | 只保留一套执行异常恢复；时间/上限受 Broker 与 SDK 约束。 | [MQ callback](../internal/mq/rocket.go)、真实 Broker 重投/DLQ E2E |
+| D10 幂等责任 | 唯一 (trusted client,event_id) + 指纹；消费检查任务终态；下游按稳定 task 标识去重（若下游支持） | 不用 trace_id/MQ MsgID 替代业务键，也不承诺外部恰好一次 | 三层分别解决不同重复来源；下游未实现幂等时，远端结果未知仍有重复风险。 | [migration 004](../migrations/004_source_event_id.sql)、[ingest](../internal/notification/accept.go)、冲突/重复 E2E |
+| D11 日志 | 使用 slog 短字段、trace/task 关联和审计日志 | 不输出正文/凭证，不加无界日志队列、逐层完整堆栈或日志平台 | 降低敏感数据和日志成本；复杂排查需结合数据库。 | [server](../cmd/server/main.go)、[Engine](../internal/delivery/engine.go)、并发上下文/敏感 canary 扫描 |
+| D12 人工闭环 | 提供失败查询、结论记录和 Broker DLQ 查询命令 | 不自动搬运 DLQ、不自动批量重放、不建审批系统 | 足以记录第一版核对事实；DLQ 不是数据库待办，坏事件仍需外部登记。 | [resolve API](../internal/api/server.go)、[README 运维入口](../README.md)、DLQ E2E |
+| D13 未来治理 | 未来按机构/共享账号配额、分组、隔离后独立扩容 | 当前不加入 Redis、集群协调、全局限流和自动熔断 | 先按观测瓶颈演进；代价是当前共享 Worker 下机构间资源隔离有限。 | 当前仅全局并发配置 [config](../internal/config/config.go)；后续设计见题目答复 |
+| D14 工程交付 | 固定 D 盘路径、固定版本、真实 Docker MySQL/RocketMQ 和完整验收 | 不用 Mock MQ、容器 running 或未执行测试宣称通过 | 需要等待真实 Broker 重试/死信，验收较慢；得到可复核证据。 | [verify scripts](../scripts/verify-docker.ps1)、[Compose](../compose.yaml)、[最新报告](verification.md) |
+| D15 API 加密与完整性 | TLS 1.3 保护传输；Bearer + RFC 9421 HMAC 签名（按讨论加入） | 不发明额外请求体加密；不将 HMAC 当加密 | TLS 保密并认证服务端；HMAC 校验调用方持钥与完整性，不保密。代价是密钥/nonce 管理。 | [TLS startup](../cmd/server/main.go)、[signature](../internal/signature/signature.go)、nonce migration 与 TLS/HMAC E2E |

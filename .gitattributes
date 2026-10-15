@@ -1,3 +1,4 @@
+.gitattributes text eol=lf
 *.go text eol=lf
 *.sh text eol=lf
 *.yaml text eol=lf
@@ -11,3 +12,4 @@
 *.log text eol=lf
 *.tsv text eol=lf
 *.ps1 text eol=crlf
+.env.example text eol=lf

@@ -1,127 +1,143 @@
 # HTTP 通知服务 MVP
 
-业务系统在用户注册、订单支付等事件发生后，常常需要调用外部机构的 HTTP 接口。如果直接在业务请求中等待外部响应，下游的延迟和故障就会影响上游；每个业务系统还需要自行处理重试、重复通知和结果查询。
+这是一个单实例 Go 服务：上游通过 RocketMQ 直接发送版本化通知事件；服务先将事件持久化到 MySQL，再异步调用受控目标的 HTTP 接口。这里不再提供 HTTP 通知提交接口，也不在服务内创建通知或发布 Outbox。API 仅提供任务查询和管理操作。
 
-本项目将这部分工作集中到一个异步通知服务中。调用方提交目标机构和请求内容，服务先保存任务，再完成后台投递，并提供状态查询与人工核对入口。技术栈为 **Go + MySQL/InnoDB + Apache RocketMQ + Transactional Outbox**，目前按单实例部署。
+## 边界与语义
 
-## 系统架构
+- RocketMQ 内部按至少一次交付处理；重复消息通过 `(client_id,event_id)` 唯一约束、请求指纹和终态检查去重。
+- 每条通知最多三次 HTTP 业务尝试，包含首次。三次 503 是正常业务终态，保存 `FAILED` 后确认消息，不再次发 MQ。
+- `FAST_FAILED`、`EXPIRED` 和 `UNCERTAIN` 都是有记录的终止结果，不表示已送达。关闭快速失败只影响后续非终态通知，不复活旧任务。
+- 只有消息尚未可靠保存处理结果的执行异常才交 RocketMQ 原生重试，耗尽后进入消费组 DLQ。
+- 不承诺每条通知最终必达或外部业务恰好一次。下游幂等键只有在下游实际实现去重时才有作用。
+- 新旧版本不能混跑同一个 Topic/Group：新版使用 `notification_ingress_v1` / `notification_ingress_workers_v1`，消息体必须符合 `schema_version=1`。
+
+## 架构
 
 ```text
-调用方 --HTTP/鉴权/幂等--> API --同一 MySQL 事务--> 通知任务 + Outbox
-                                                        |
-                                            Go 定时扫描并发布消息
-                                                        v
-                                                    RocketMQ
-                                                        |
-                               单条消费 + 有界并发 ------+
-                                         |
-                                         v
-                                    外部 HTTP 接口
-                                         |
-                                         v
-                                保存投递结果，完成消费
+上游业务事务 + 上游 Outbox（由上游负责）
+          |
+          | RocketMQ：完整版本化事件（event_id 稳定）
+          v
+Go 消费者（单条回调、有界并发）
+          |
+          | MySQL：先持久化 notification；唯一键去重
+          v
+HTTP 投递器（最多 3 次业务尝试）
+          |
+          +--> 终态保存后 ACK
+          +--> 执行未完成时 RocketMQ 原生重试 / DLQ
+
+HTTPS 查询/管理员 API ------> MySQL
 ```
 
-API、Outbox 发布器和消费者运行在同一个 Go 进程中。MySQL 保存任务、尝试记录和发布状态；RocketMQ 负责消息交付及执行异常的原生重试。完整流程、事务边界和状态转换见[设计说明](docs/design.md)。
+MQ 事件至少包含：
 
-## 三个关键设计
+```json
+{
+  "schema_version": 1,
+  "event_id": "order-123-notification",
+  "trace_id": "trace-7a91",
+  "destination_id": "mock-target",
+  "method": "POST",
+  "headers": {"Content-Type": "application/json"},
+  "body": "{\"order_id\":\"123\"}",
+  "expires_at": "2026-10-15T16:00:00Z"
+}
+```
 
-**1. 先可靠受理，再异步投递。** 通知任务和 Outbox 在同一个 MySQL 事务中提交，避免任务已经受理、消息却没有发出的双写问题。调用方使用幂等键重复提交时，同内容复用原任务，不同内容返回冲突。接口返回 `202` 表示任务已保存，外部机构的投递结果需要另外查询。
+生产者通过配置把可信上游身份绑定到消费组设置 `MQ_TRUSTED_CLIENT_ID`；事件正文不能自报 `client_id`。`event_id` 必须在上游事务重发时保持不变。指纹覆盖目标、规范化方法、规范化 Header、原始 UTF-8 Body 和绝对 UTC 有效期，不覆盖 `trace_id`。同身份同事件 ID、同指纹复用任务；同 ID 不同内容是协议冲突，按原生异常重试/DLQ，不覆盖、不发送。
 
-**2. 将业务重试和执行异常分开。** 每个任务最多进行三次 HTTP 业务尝试，包含首次。429/5xx 可以在剩余时间内退避重试；次数耗尽后保存终止失败结果并完成消费。只有数据库故障、进程中断等导致执行未完成或结果未可靠保存的情况，才交给 RocketMQ 原生重试，重复消息不会重新获得三次机会。机构长期不可用时，管理员可以开启快速失败；命中开关的任务保存终态，关闭开关后旧任务不会自动补发。
+## 启动演示
 
-**3. 对结果不明的请求采取保守策略。** HTTP 成功后写库暂时失败，先重试保存结果，避免再次调用外部接口。若超时、断连或中断后的恢复无法确认远端是否执行，则记录 `UNCERTAIN` 并停止自动发送，交由人工核对。这降低了重复副作用的风险，代价是部分通知需要人工处理；服务不承诺最终必达或外部业务恰好一次。
-
-这些选择的替代方案和代价见[设计决策](docs/decisions.md)，系统边界与扩容分析见[题目逐项答复](docs/assignment-answers.md)。
-
-## 快速启动
-
-需要 Docker Engine 和 Compose 插件；Windows 可使用运行 Linux 容器的 Docker Desktop，无需另装 Go、MySQL 或 RocketMQ。启动 Docker 后，在项目根目录执行：
+需要 Docker Engine、Compose 和可用网络；本地无需 Go、MySQL 或 RocketMQ：
 
 ```powershell
-docker info
-if (-not (Test-Path -LiteralPath '.env')) { Copy-Item .env.example .env }
+Set-Location 'D:\rc_notification'
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 .\scripts\dev-up.ps1
 ```
 
-首次使用时复制 `.env.example`，已有配置保持不变。示例 Bearer token 和 HMAC 密钥只用于本机演示，不能用于共享或生产环境。应用默认监听 `https://127.0.0.1:8443`，TLS 最低版本为 1.3；MySQL 和 MQ 管理端口不映射到宿主机。`dev-up.ps1` 导出本地演示 CA 到被 Git 忽略的 `.local-certs/ca.crt`。
-
 ```powershell
-docker compose -p rcnotif-dev ps
 curl.exe --ssl-no-revoke --cacert .local-certs\ca.crt https://localhost:8443/healthz
 curl.exe --ssl-no-revoke --cacert .local-certs\ca.crt https://localhost:8443/readyz
+docker compose -p rcnotif-dev ps
 ```
 
-这里的 `--ssl-no-revoke` 只为没有 CRL/OCSP 的本地演示证书跳过吊销查询，仍通过 `--cacert` 验证证书链；不要把它用于生产客户端。`/healthz` 检查进程存活，`/readyz` 检查 MySQL、MQ 客户端状态和 Broker TCP 连通性。默认配置及超时参数见 [.env.example](.env.example) 和[设计说明](docs/design.md)。本地证书只用于演示；部署时应使用受信任证书。若在受控 HTTPS 网关终止外部 TLS，网关到应用仍须通过 TLS 1.3，并限制应用只接受该网关的流量。本实现按应用收到的 URI 验签，不支持也不信任未经认证的原始 URI 转发头。
+`--ssl-no-revoke` 只用于缺少吊销服务的本地演示证书，仍验证证书链；生产客户端不可照搬。默认 TLS 最低为 1.3。数据库、NameServer 和 Broker 管理端口不映射到宿主机。示例 token、HMAC key 和证书仅用于本机。
 
-## API 与调用示例
-
-所有 `/api/*` 路由都要求 HTTPS、Bearer token 和 RFC 9421 `hmac-sha256` 请求签名。签名还覆盖 `Content-Digest`（RFC 9530）、方法、authority、目标 URI、路径和 Authorization；通知提交额外覆盖 `Idempotency-Key`，并要求有效时间与一次性 nonce。服务把已用 nonce 写入 MySQL，阻止签名重放。Bearer token 与签名密钥分别校验；客户端和管理员使用不同 key ID/密钥。签名验证来源与完整性，不加密内容，也不能替代 TLS。
+发送演示消息（该命令仅是测试生产者，不代表上游业务 Outbox）：
 
 ```powershell
-docker compose -p rcnotif-dev --profile verify run --rm --build test-runner go run ./cmd/demo-client
+docker compose -p rcnotif-dev --profile verify run --rm --build test-runner go run ./cmd/demo-producer -event-id demo-order-123 -count 2 -content-type application/json -body '{"order_id":"123"}'
 ```
 
-该容器示例使用 `.env` 中的本地演示 token/密钥和 CA，打印 TLS 协商版本及 `202` 响应。真实客户端应使用自己的密钥管理和 RFC 9421 实现为每个请求生成新 nonce，不能复用签名头。生产环境至少替换两组 32 字节以上的随机 HMAC 密钥与 Bearer token，并通过密钥管理流程轮换；不要提交 `.env`。
+两条消息使用同一事件 ID 和内容，用于验证 Broker 收到重复消息时只处理同一任务。查看 Broker 消费组和 DLQ：
 
-| 接口 | 鉴权 | 说明 |
+```bash
+docker compose -p rcnotif-dev exec broker /home/rocketmq/rocketmq-5.5.0/bin/mqadmin consumerStatus -n namesrv:9876 -g notification_ingress_workers_v1
+docker compose -p rcnotif-dev exec broker /home/rocketmq/rocketmq-5.5.0/bin/mqadmin printMsg -n namesrv:9876 -t '%DLQ%notification_ingress_workers_v1' -c UTF-8 -d false
+```
+
+查看死信正文应在受控终端按需执行，并只记录必要的事件标识和处置结论。系统不自动同步 DLQ 为数据库工单，也不自动重放。
+
+## 查询与管理 API
+
+除 `/healthz`、`/readyz` 外，`/api/*` 都要求 HTTPS、客户端或管理员 Bearer token、RFC 9421 HMAC-SHA-256 签名及未使用 nonce。HMAC 验证来源和完整性，不加密正文；TLS 才保护传输。签名覆盖方法、authority、目标 URI、path、Authorization、Content-Digest 和有效期；不同 key ID 区分客户端与管理员。生成签名需要 RFC 9421 客户端实现，不能复制复用 nonce。
+
+| 路由 | 身份 | 说明 |
 |---|---|---|
-| `POST /api/v1/notifications` | HTTPS + 客户端 Bearer + HMAC 签名 + `Idempotency-Key` | 同键同内容返回原任务；同键异内容 `409`；事务提交后返回 `202` |
-| `GET /api/v1/notifications/{id}` | HTTPS + 客户端 Bearer + HMAC 签名 | 查询当前客户端的任务与尝试记录，不返回原请求头或正文 |
-| `GET /api/v1/notifications?status=FAILED&page=1&page_size=20` | HTTPS + 客户端 Bearer + HMAC 签名 | 按状态分页查询，最大页大小 100 |
-| `PATCH /api/v1/admin/destinations/{id}/fast-fail` | HTTPS + 管理员 Bearer + 管理员 HMAC 签名 | 请求体 `{"enabled":true,"reason":"人工原因"}`；记录配置身份、原因和时间 |
-| `POST /api/v1/admin/notifications/{id}/resolve` | HTTPS + 管理员 Bearer + 管理员 HMAC 签名 | 请求体 `{"conclusion":"人工核对结论"}`；记录结论，不改变投递状态或重放任务 |
-| `GET /healthz` | 无 | 检查进程存活 |
-| `GET /readyz` | 无 | 检查依赖可用性；MQ 不可用时返回 503 |
+| `GET /healthz` | 无 | 进程存活探针 |
+| `GET /readyz` | 无 | 检查 MySQL、消费者启动状态和 Broker 连通性；依赖不可用返回 503 |
+| `GET /api/v1/notifications/{id}` | 客户端 | 只查询认证客户端自己的任务和尝试记录 |
+| `GET /api/v1/notifications?status=FAILED&page=1&page_size=20` | 客户端 | 分页列表，最大页大小 100 |
+| `PATCH /api/v1/admin/destinations/{id}/fast-fail` | 管理员 | 请求 `{"enabled":true,"reason":"人工原因"}`；记录操作人、原因、时间 |
+| `POST /api/v1/admin/notifications/{id}/resolve` | 管理员 | 请求 `{"conclusion":"核对结论"}`；记录结论，不改变投递状态或重发 |
 
-演示目的地由 migration 初始化为 `http://mock-target:8090/notify`。请求只能引用已配置的机构，受理时会检查目标协议、主机和端口。管理员审计身份来自 `ADMIN_ACTOR`，不接受客户端自报。
+目标通过初始化数据配置，且必须匹配 `ALLOWED_TARGET` 的 HTTP(S) scheme、host 和 port。Body 限为 UTF-8 原始文本，支持 JSON、XML、表单和纯文本，不支持 multipart/大文件。下游 HTTPS 会验证证书；服务关闭自动重定向以限制 SSRF 风险。
 
-## 测试与验证
+## Docker 完整验收
 
-最新 Docker 验收 `20261015T074216Z-479b6b19` 退出码为 0；TLS/HMAC 场景和真实 MySQL/RocketMQ E2E 结果见[验收报告](docs/verification.md)及[精简证据](docs/evidence/20261015T074216Z-479b6b19/)。
-
-在项目根目录运行完整验收：
+Windows：
 
 ```powershell
+Set-Location 'D:\rc_notification'
 .\scripts\verify-docker.ps1
 ```
 
-仓库也提供 Bash 入口：
+WSL/Linux（先确认 /mnt/d 确实映射 D 盘）：
 
 ```bash
+findmnt -T /mnt/d/rc_notification
+cd /mnt/d/rc_notification
 bash scripts/verify-docker.sh
 ```
 
-已归档的通过记录使用 Windows PowerShell。使用 WSL 时，需先确认项目所在盘的挂载与 Docker 集成正常。脚本创建独立的 Compose project 和命名卷，报告输出到 `reports/<run_id>/`。
+脚本使用固定版本镜像和独立 Compose project，启动真实 MySQL、RocketMQ NameServer/Broker、应用及可计数 mock target；容器内运行格式、vet、单测、race 和真实集成/E2E。它验证直入 MQ、重复/冲突、3 次 503、数据库异常原生重投和 DLQ、SIGTERM、快速失败、到期及 TLS/HMAC。最新验收 PASS：run 20261015T150311Z-bf5a516b，完整脚本退出码 0；精简证据见[本次报告目录](docs/evidence/20261015T150311Z-bf5a516b/)和[验收说明](docs/verification.md)。完整日志保存在本机 reports/<run_id>/，不上传。只有最新代码完整脚本退出码为 0 才记录 Docker PASS。
 
-## 人工核对与死信排查
+## 迁移与切换
 
-可按 `FAILED` 或 `UNCERTAIN` 查询任务，结合尝试记录和 `result_reason` 核对外部机构的实际结果。resolve 接口仅接受 FAILED、FAST_FAILED、EXPIRED、UNCERTAIN，保存结论后仍保留原投递状态。
+新版另用 notification_ingress_v1，不消费旧 ID-only 消息，也不读取旧 Outbox。切换前让旧版本停止接收新业务、排空旧 Topic 和消费组；检查旧数据库中未发布 Outbox：
 
-RocketMQ 执行异常重试耗尽后进入 `%DLQ%notification_delivery_workers`。如果对应任务仍处于 PENDING/PROCESSING，或任务记录不存在，现有 resolve 接口无法记录结论，需要另外保留人工处置记录，详见[人工处理的限制](docs/implementation-review.md#r03dlq-消息不一定能通过现有-resolve-接口闭环)。可在 Broker 容器中查询消费组和死信：
-
-```bash
-docker compose -p rcnotif-dev exec broker /home/rocketmq/rocketmq-5.5.0/bin/mqadmin consumerStatus -n namesrv:9876 -g notification_delivery_workers
-docker compose -p rcnotif-dev exec broker /home/rocketmq/rocketmq-5.5.0/bin/mqadmin printMsg -n namesrv:9876 -t '%DLQ%notification_delivery_workers' -c UTF-8 -d false
+```sql
+SELECT o.outbox_id, o.event_id, o.task_id, o.publish_state, o.next_attempt_at
+FROM outbox AS o
+ORDER BY o.next_attempt_at, o.outbox_id
+LIMIT 1000;
 ```
 
-`-c` 指定字符集，`-d false` 关闭正文打印。需要查看事件中的 task/event ID 时，可在受控终端按需开启正文，仅保留必要标识和核对结论。当前没有自动死信重放功能。
+旧表和卷保留，不运行旧/新版本共同写同一任务。旧待发记录须由旧版本继续发布或由负责人核对后按新 schema 显式导出；不能把旧消息直接改成新版格式，也不能把旧 FAST_FAILED/FAILED 自动复活。迁移 004_source_event_id.sql 为旧任务增加 nullable 新事件去重键，不删除历史数据。
 
-## 文档导航
+## 文档
 
-| 文档 | 重点内容 |
-|---|---|
-| [完整设计](docs/design.md) | 处理流程、事务边界、幂等、状态机、HTTP 投递与资源控制 |
-| [题目逐项答复](docs/assignment-answers.md) | 系统边界、可靠性、AI 取舍、未来演进与中间件选择 |
-| [设计决策](docs/decisions.md) | 备选方案、选择理由、收益和代价 |
-| [AI 使用说明](AI_USAGE.md) | AI 参与范围、关键选择及具体实现案例 |
-| [工程规范映射](docs/standards.md) | Go、MySQL、RocketMQ 与 TLS/HMAC 规则及自动验证位置 |
-| [要求映射](docs/requirements-mapping.md) | 作业/用户约束到文档、代码与证据的对应关系 |
-| [验收报告](docs/verification.md) | 测试方法、实际结果和可查阅的原始报告 |
-| [已知限制与改进方向](docs/implementation-review.md) | 当前实现的边界、改进建议及源码依据 |
+- [设计和状态机](docs/design.md)
+- [作业逐项答复](docs/assignment-answers.md)
+- [决策记录](docs/decisions.md)
+- [要求映射](docs/requirements-mapping.md)
+- [Go、MySQL、RocketMQ 规范落实](docs/standards.md)
+- [AI 使用说明](AI_USAGE.md)
+- [Docker 验收记录](docs/verification.md)
+- [实现审查与限制](docs/implementation-review.md)
 
-## 当前限制
+## 限制
 
-当前采用单应用、单 MySQL、单 Broker，尚未提供多实例执行协调、机构级 QPS 配额、自动熔断或高可用部署，也没有生产吞吐量的压测结论。共享消费者资源意味着慢机构可能影响其他机构，后续需要结合负载引入分组隔离。
-
-TLS 1.3 保护客户端到服务的传输；HMAC 签名只校验来源和完整性，不会加密落库的请求正文，也不覆盖服务到下游机构的传输。服务到下游使用 HTTPS 时会校验对方证书。三次上限针对 HTTP 业务尝试，Go Transport 在部分连接故障下可能内部重试；快速失败开关也不会撤销已经在途的请求，配置读取与发送之间存在竞态。发送时目标复核、迁移中断恢复、异常日志与锁等待预算等问题详见[已知限制](docs/implementation-review.md)。
+MVP 以一个 Go 实例、一个 MySQL 和单 Broker 开发拓扑为目标，不提供多实例全局配额、HA、生产容量保证、自动熔断、半开探测、自动 DLQ 工单或终态批量重放。上游需要自行保证其业务事务到上游 Outbox 的原子交接；本项目不接管上游事务。远端成功、本地无法确认时保存 `UNCERTAIN`，下游不支持幂等时仍存在重复副作用风险。`http_attempts` 表示应用启动的业务尝试；Go `net/http` 对少数连接失败有内部重试行为，因此不能将三次业务预算表述成任意网络故障下绝对最多三次物理发送。

@@ -13,10 +13,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -28,8 +28,6 @@ import (
 	"github.com/apache/rocketmq-client-go/v2/primitive"
 	"github.com/apache/rocketmq-client-go/v2/producer"
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/ordinary-s/rc_ordinary-s/internal/config"
-	"github.com/ordinary-s/rc_ordinary-s/internal/delivery"
 	"github.com/ordinary-s/rc_ordinary-s/internal/mq"
 	"github.com/ordinary-s/rc_ordinary-s/internal/notification"
 	"github.com/ordinary-s/rc_ordinary-s/internal/signature"
@@ -39,9 +37,12 @@ import (
 type taskView struct {
 	Notification struct {
 		ID           string `json:"task_id"`
+		TraceID      string `json:"trace_id"`
+		Destination  string `json:"destination_id"`
 		Status       string `json:"status"`
 		HTTPAttempts int    `json:"http_attempts"`
 		Reason       string `json:"result_reason"`
+		Resolution   string `json:"resolution"`
 	} `json:"notification"`
 	Attempts []struct {
 		State string `json:"state"`
@@ -51,10 +52,11 @@ type taskView struct {
 type statsView struct {
 	Count       int `json:"count"`
 	MaxInFlight int `json:"max_in_flight"`
-	Items       []struct {
+	Requests    []struct {
 		ContentType string `json:"content_type"`
 		Key         string `json:"idempotency_key"`
 		TaskID      string `json:"task_id"`
+		TraceID     string `json:"trace_id"`
 		Body        string `json:"body"`
 	} `json:"requests"`
 }
@@ -63,19 +65,109 @@ type suite struct {
 	t           *testing.T
 	api         string
 	mock        string
+	clientID    string
 	token       string
 	admin       string
 	clientKeyID string
 	clientKey   []byte
 	adminKeyID  string
 	adminKey    []byte
-	tlsRoots    *x509.CertPool
 	db          *sql.DB
 	client      *http.Client
+	producer    rocketmq.Producer
 	report      []map[string]any
+	contexts    [][2]string
 }
 
-func newSuite(t *testing.T, api, mock string, db *sql.DB, report []map[string]any) *suite {
+type retryObserver struct {
+	messages chan *primitive.MessageExt
+	consumer rocketmq.PushConsumer
+}
+
+type dlqObserver struct {
+	messages chan *primitive.MessageExt
+	consumer rocketmq.PushConsumer
+}
+
+func TestEndToEndWithMySQLAndRocketMQ(t *testing.T) {
+	apiURL := env(t, "TEST_API_URL")
+	mockURL := env(t, "TEST_MOCK_URL")
+	db, err := sql.Open("mysql", env(t, "TEST_DB_DSN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		t.Fatalf("MySQL unavailable: %v", err)
+	}
+
+	s := newSuite(t, apiURL, mockURL, db)
+	defer s.close()
+	defer s.writeReport()
+	if err := s.startProducer(); err != nil {
+		t.Fatal(err)
+	}
+
+	retry := s.observeRetries(t)
+	dlq := s.observeDLQ(t)
+	t.Run("TLS HMAC and removed HTTP submit route", func(t *testing.T) { s.testAPISecurityAndRemovedSubmit(t) })
+	t.Run("MQ event dedupe, payload conflict, raw body and demo producer", func(t *testing.T) { s.testMQIngressAndDemoProducer(t, dlq) })
+	t.Run("concurrent duplicate MQ delivery uses one task", func(t *testing.T) { s.testConcurrentDuplicateIngress(t) })
+	t.Run("transient HTTP failure succeeds on the second business attempt", func(t *testing.T) { s.testSecondAttemptSuccess(t) })
+	t.Run("three HTTP attempts then terminal ACK", func(t *testing.T) { s.testThreeAttemptsAndTerminalDuplicate(t) })
+	t.Run("notification commit before HTTP and native recovery", func(t *testing.T) { s.testIngestCommitBeforeAttempt(t, retry) })
+	t.Run("notification insert failure does not call HTTP", func(t *testing.T) { s.testNotificationInsertFailure(t, retry) })
+	t.Run("fast fail, expiry and manual resolution", func(t *testing.T) { s.testTerminalPoliciesAndAdmin(t) })
+	t.Run("result write failure does not repeat HTTP", func(t *testing.T) { s.testResultWriteFailure(t, retry) })
+	t.Run("protocol errors and execution error reach native DLQ", func(t *testing.T) { s.testNativeDLQPaths(t, dlq) })
+	t.Run("task identity is scoped by trusted client", func(t *testing.T) { s.testClientScopedEventKeys(t) })
+	s.saveContexts()
+}
+
+func TestSIGTERMInterruptsInFlightDelivery(t *testing.T) {
+	db, err := sql.Open("mysql", env(t, "TEST_DB_DSN"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := newSuite(t, env(t, "TEST_API_URL"), env(t, "TEST_MOCK_URL"), db)
+	defer s.close()
+	defer s.writeReport()
+	if err := s.startProducer(); err != nil {
+		t.Fatal(err)
+	}
+	s.reset(t)
+	s.configure(t, []int{200}, 8000)
+	event := s.newEvent("e2e-sigterm-"+shortID(), "in-flight must remain uncertain after stop")
+	s.sendEvent(t, event)
+	taskID := s.waitTaskIDByEvent(t, event.EventID, 20*time.Second)
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if s.stats(t).Count > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if s.stats(t).Count == 0 {
+		t.Fatal("mock target did not observe the in-flight delivery")
+	}
+	control := env(t, "TEST_CONTROL_DIR")
+	if err := os.WriteFile(filepath.Join(control, "sigterm-armed"), []byte("armed"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	waitForFile(t, filepath.Join(control, "sigterm-stopped"), 120*time.Second)
+	waitForFile(t, filepath.Join(control, "sigterm-resume"), 180*time.Second)
+	task := s.wait(t, taskID, "UNCERTAIN", 60*time.Second)
+	if task.Notification.HTTPAttempts != 1 || s.stats(t).Count != 1 {
+		t.Fatalf("SIGTERM recovery repeated HTTP: attempts=%d mock_calls=%d", task.Notification.HTTPAttempts, s.stats(t).Count)
+	}
+	s.record("sigterm_inflight_is_recovered_as_uncertain", map[string]any{"task_id": taskID, "http_attempts": 1, "mock_calls": 1, "status": task.Notification.Status})
+	s.saveContexts()
+}
+
+func newSuite(t *testing.T, apiURL, mockURL string, db *sql.DB) *suite {
 	t.Helper()
 	ca, err := os.ReadFile(env(t, "TEST_TLS_CA_FILE"))
 	if err != nil {
@@ -95,900 +187,769 @@ func newSuite(t *testing.T, api, mock string, db *sql.DB, report []map[string]an
 	}
 	transport := &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots}}
 	return &suite{
-		t: t, api: api, mock: mock, token: env(t, "TEST_CLIENT_TOKEN"), admin: env(t, "TEST_ADMIN_TOKEN"),
+		t: t, api: apiURL, mock: mockURL, clientID: env(t, "TEST_CLIENT_ID"),
+		token: env(t, "TEST_CLIENT_TOKEN"), admin: env(t, "TEST_ADMIN_TOKEN"),
 		clientKeyID: env(t, "TEST_CLIENT_SIGNATURE_KEY_ID"), clientKey: clientKey,
 		adminKeyID: env(t, "TEST_ADMIN_SIGNATURE_KEY_ID"), adminKey: adminKey,
-		tlsRoots: roots, db: db, client: &http.Client{Timeout: 5 * time.Second, Transport: transport}, report: report,
+		db: db, client: &http.Client{Timeout: 6 * time.Second, Transport: transport},
+		report: make([]map[string]any, 0), contexts: make([][2]string, 0),
 	}
 }
 
-func (s *suite) testTLSAndRequestSignatures(t *testing.T) {
+func (s *suite) startProducer() error {
+	nameserver, err := resolveNameServer(env(s.t, "ROCKETMQ_NAMESRV"))
+	if err != nil {
+		return err
+	}
+	client, err := rocketmq.NewProducer(
+		producer.WithGroupName("notification_integration_upstream"),
+		producer.WithNsResolver(primitive.NewPassthroughResolver([]string{nameserver})),
+		producer.WithRetry(0), producer.WithSendMsgTimeout(5*time.Second),
+	)
+	if err != nil {
+		return err
+	}
+	if err := client.Start(); err != nil {
+		return err
+	}
+	s.producer = client
+	return nil
+}
+
+func (s *suite) close() {
+	if s.producer != nil {
+		_ = s.producer.Shutdown()
+	}
+}
+
+func (s *suite) testAPISecurityAndRemovedSubmit(t *testing.T) {
 	s.reset(t)
-	response, err := s.client.Get(s.api + "/healthz")
+	resp, err := s.client.Get(s.api + "/healthz")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.TLS == nil || response.TLS.Version != tls.VersionTLS13 {
-		response.Body.Close()
-		t.Fatalf("TLS negotiation=%v, want TLS 1.3", response.TLS)
+	if resp.TLS == nil || resp.TLS.Version != tls.VersionTLS13 {
+		resp.Body.Close()
+		t.Fatalf("TLS negotiation=%v, want TLS 1.3", resp.TLS)
 	}
-	response.Body.Close()
-	tls12Client := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{
-		MinVersion: tls.VersionTLS12, MaxVersion: tls.VersionTLS12, RootCAs: s.tlsRoots,
-	}}}
-	if response, err := tls12Client.Get(s.api + "/healthz"); err == nil {
-		response.Body.Close()
+	resp.Body.Close()
+	tls12 := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, MaxVersion: tls.VersionTLS12, RootCAs: s.client.Transport.(*http.Transport).TLSClientConfig.RootCAs}}}
+	if resp, err := tls12.Get(s.api + "/healthz"); err == nil {
+		resp.Body.Close()
 		t.Fatal("TLS 1.2-only client unexpectedly connected")
 	}
 
-	payload, _ := json.Marshal(map[string]any{"destination_id": "mock-target", "method": "POST", "headers": map[string]string{"Content-Type": "text/plain"}, "body": "signature-test"})
-	unsigned, _ := http.NewRequest(http.MethodPost, s.api+"/api/v1/notifications", bytes.NewReader(payload))
+	unsigned, _ := http.NewRequest(http.MethodGet, s.api+"/api/v1/notifications", nil)
 	unsigned.Header.Set("Authorization", "Bearer "+s.token)
-	unsigned.Header.Set("Idempotency-Key", "signature-unsigned")
-	response, err = s.client.Do(unsigned)
+	resp, err = s.client.Do(unsigned)
 	if err != nil {
 		t.Fatal(err)
 	}
-	response.Body.Close()
-	if response.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("unsigned request status=%d, want 401", response.StatusCode)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unsigned API request status=%d, want 401", resp.StatusCode)
 	}
 
-	authTampered := s.newSignedRequest(t, http.MethodPost, "/api/v1/notifications", payload, "signature-auth-tampered", false)
-	authTampered.Header.Set("Authorization", "Bearer "+s.admin)
-	response, err = s.client.Do(authTampered)
+	oldSubmit := s.signedRequest(t, http.MethodPost, "/api/v1/notifications", []byte(`{"body":"must-not-be-accepted"}`), false)
+	resp, err = s.client.Do(oldSubmit)
 	if err != nil {
 		t.Fatal(err)
 	}
-	response.Body.Close()
-	if response.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("authorization tampering status=%d, want 401", response.StatusCode)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound && resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("removed submit endpoint status=%d, want 404 or 405", resp.StatusCode)
 	}
 
-	clientSignedAdminRequest := s.newSignedRequest(t, http.MethodPatch, "/api/v1/admin/destinations/mock-target/fast-fail", []byte(`{"enabled":false,"reason":"role separation test"}`), "", false)
-	response, err = s.client.Do(clientSignedAdminRequest)
+	clientOnAdmin := s.signedRequest(t, http.MethodPatch, "/api/v1/admin/destinations/mock-target/fast-fail", []byte(`{"enabled":false,"reason":"role test"}`), false)
+	resp, err = s.client.Do(clientOnAdmin)
 	if err != nil {
 		t.Fatal(err)
 	}
-	response.Body.Close()
-	if response.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("client signature on admin route status=%d, want 401", response.StatusCode)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("client credentials reached admin route: status=%d", resp.StatusCode)
 	}
-
-	tampered := s.newSignedRequest(t, http.MethodPost, "/api/v1/notifications", payload, "signature-tampered", false)
-	changedBody := []byte(`{"tampered":true}`)
-	wireRequest, err := http.NewRequest(http.MethodPost, s.api+"/api/v1/notifications", bytes.NewReader(changedBody))
-	if err != nil {
-		t.Fatal(err)
-	}
-	wireRequest.Header = tampered.Header.Clone()
-	response, err = s.client.Do(wireRequest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response.Body.Close()
-	if response.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("body tampering status=%d, want 401", response.StatusCode)
-	}
-
-	expired, _ := http.NewRequest(http.MethodPost, s.api+"/api/v1/notifications", bytes.NewReader(payload))
-	expired.Header.Set("Authorization", "Bearer "+s.token)
-	expired.Header.Set("Content-Type", "application/json")
-	expired.Header.Set("Idempotency-Key", "signature-expired")
-	if _, err := signature.SignRequestWithNonce(expired, s.clientKeyID, s.clientKey, time.Now().Add(-10*time.Minute), "expired-nonce-0123456789"); err != nil {
-		t.Fatal(err)
-	}
-	response, err = s.client.Do(expired)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response.Body.Close()
-	if response.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("expired signature status=%d, want 401", response.StatusCode)
-	}
-
-	request := s.newSignedRequest(t, http.MethodPost, "/api/v1/notifications", payload, "signature-replay", false)
-	body, err := io.ReadAll(request.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Body = io.NopCloser(bytes.NewReader(body))
-	response, err = s.client.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	acceptedBody, err := io.ReadAll(response.Body)
-	response.Body.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.StatusCode != http.StatusAccepted {
-		t.Fatalf("signed request status=%d body=%s", response.StatusCode, acceptedBody)
-	}
-	var accepted struct {
-		TaskID string `json:"task_id"`
-	}
-	if err := json.Unmarshal(acceptedBody, &accepted); err != nil || accepted.TaskID == "" {
-		t.Fatalf("decode accepted signed request: task_id=%q err=%v", accepted.TaskID, err)
-	}
-	replay := request.Clone(context.Background())
-	replay.Body = io.NopCloser(bytes.NewReader(body))
-	response, err = s.client.Do(replay)
-	if err != nil {
-		t.Fatal(err)
-	}
-	response.Body.Close()
-	if response.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("replayed signature status=%d, want 401", response.StatusCode)
-	}
-	s.wait(t, accepted.TaskID, "DELIVERED")
-	s.record("tls13_and_hmac_signature", map[string]any{"negotiated_tls": "1.3", "tls12_only_rejected": true, "unsigned_rejected": true, "authorization_tampering_rejected": true, "client_signature_on_admin_route_rejected": true, "body_tampering_rejected": true, "expired_signature_rejected": true, "nonce_replay_rejected": true})
+	s.record("tls13_hmac_role_separation_and_no_http_submit", map[string]any{"tls13": true, "tls12_rejected": true, "unsigned_api_rejected": true, "post_notifications_status": resp.StatusCode})
 }
 
-func TestEndToEndWithMySQLAndRocketMQ(t *testing.T) {
-	api := env(t, "TEST_API_URL")
-	mock := env(t, "TEST_MOCK_URL")
-	db, err := sql.Open("mysql", env(t, "TEST_DB_DSN"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := db.PingContext(ctx); err != nil {
-		t.Fatalf("MySQL unavailable: %v", err)
-	}
-	s := newSuite(t, api, mock, db, make([]map[string]any, 0))
-	defer s.writeReport()
-	t.Run("TLS 1.3 and HMAC request signature", s.testTLSAndRequestSignatures)
-
-	t.Run("acceptance/idempotency/transaction", func(t *testing.T) {
-		s.reset(t)
-		id := s.submit(t, "idempotent-a", "application/json", "{\"message\":\"one\",\"body_canary\":\"notification-body-secret-canary-9ba8\"}")
-		again := s.submit(t, "idempotent-a", "application/json", "{\"message\":\"one\",\"body_canary\":\"notification-body-secret-canary-9ba8\"}")
-		if id != again {
-			t.Fatalf("duplicate returned %s, want %s", again, id)
-		}
-		status, _ := s.create(t, "idempotent-a", "{\"message\":\"different\"}")
-		if status != http.StatusConflict {
-			t.Fatalf("changed request status=%d, want 409", status)
-		}
-		task := s.wait(t, id, "DELIVERED")
-		stats := s.stats(t)
-		var notifications, outboxes int
-		if err := db.QueryRow("SELECT COUNT(*) FROM notification WHERE task_id=?", id).Scan(&notifications); err != nil {
-			t.Fatal(err)
-		}
-		if err := db.QueryRow("SELECT COUNT(*) FROM outbox WHERE task_id=?", id).Scan(&outboxes); err != nil {
-			t.Fatal(err)
-		}
-		if notifications != 1 || outboxes != 1 || task.Notification.HTTPAttempts != 1 || stats.Count != 1 {
-			t.Fatalf("unexpected acceptance counts n=%d o=%d attempts=%d calls=%d", notifications, outboxes, task.Notification.HTTPAttempts, stats.Count)
-		}
-		var state string
-		if err := db.QueryRow("SELECT publish_state FROM outbox WHERE task_id=?", id).Scan(&state); err != nil {
-			t.Fatal(err)
-		}
-		if state != "PUBLISHED" {
-			t.Fatalf("outbox state=%s", state)
-		}
-		if err := s.republish(id); err != nil {
-			t.Fatal(err)
-		}
-		time.Sleep(1500 * time.Millisecond)
-		if after := s.stats(t).Count; after != 1 {
-			t.Fatalf("duplicate success message caused %d HTTP calls", after)
-		}
-		s.record("acceptance_transaction_and_idempotency", map[string]any{"task_id": id, "notifications": notifications, "outboxes": outboxes, "outbox_state": state, "mock_calls": stats.Count, "after_duplicate": 1})
-	})
-
-	t.Run("persisted retry due survives cancellation", s.testPersistedRetryDue)
-	t.Run("resolution database failure returns 500", s.testResolutionDatabaseFailure)
-	t.Run("outbox publish succeeds but local mark fails", s.testOutboxMarkFailure)
-
-	t.Run("case-sensitive keys and concurrent duplicate submit", func(t *testing.T) {
-		s.reset(t)
-		upper := s.submit(t, "CaseKey", "text/plain", "x")
-		lower := s.submit(t, "casekey", "text/plain", "x")
-		if upper == lower {
-			t.Fatal("binary collation merged case-distinct idempotency keys")
-		}
-		const workers = 8
-		key := "parallel-key"
-		payload := map[string]any{"destination_id": "mock-target", "method": "POST", "headers": map[string]string{"Content-Type": "text/plain"}, "body": "parallel"}
-		raw, _ := json.Marshal(payload)
-		ids := make(chan string, workers)
-		errs := make(chan error, workers)
-		var wg sync.WaitGroup
-		for i := 0; i < workers; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				code, body := s.post(t, "/api/v1/notifications", raw, key)
-				if code != http.StatusAccepted {
-					errs <- fmt.Errorf("status %d", code)
-					return
-				}
-				var v struct {
-					ID string `json:"task_id"`
-				}
-				if err := json.Unmarshal(body, &v); err != nil {
-					errs <- err
-					return
-				}
-				ids <- v.ID
-			}()
-		}
-		wg.Wait()
-		close(ids)
-		close(errs)
-		for err := range errs {
-			t.Fatal(err)
-		}
-		first := ""
-		for id := range ids {
-			if first == "" {
-				first = id
-			}
-			if id != first {
-				t.Fatalf("concurrent ids differ: %s %s", first, id)
-			}
-		}
-		var n, o int
-		if err := db.QueryRow("SELECT COUNT(*) FROM notification WHERE task_id=?", first).Scan(&n); err != nil {
-			t.Fatal(err)
-		}
-		if err := db.QueryRow("SELECT COUNT(*) FROM outbox WHERE task_id=?", first).Scan(&o); err != nil {
-			t.Fatal(err)
-		}
-		if n != 1 || o != 1 {
-			t.Fatalf("concurrent creation produced n=%d outboxes=%d", n, o)
-		}
-		s.wait(t, first, "DELIVERED")
-		s.record("case_sensitive_and_parallel_idempotency", map[string]any{"case_distinct": true, "concurrent_task_id": first, "notification_rows": n, "outbox_rows": o})
-	})
-
-	t.Run("concurrent tasks keep trace and task log context paired", s.testConcurrentLogContext)
-
-	t.Run("503 then success", func(t *testing.T) {
-		s.configure(t, []int{503, 200})
-		start := time.Now()
-		id := s.submit(t, "retry-success", "text/plain", "retry")
-		task := s.wait(t, id, "DELIVERED")
-		stats := s.stats(t)
-		elapsed := time.Since(start)
-		if task.Notification.HTTPAttempts != 2 || len(task.Attempts) != 2 || stats.Count != 2 {
-			t.Fatalf("attempts=%d rows=%d calls=%d", task.Notification.HTTPAttempts, len(task.Attempts), stats.Count)
-		}
-		if elapsed < 35*time.Millisecond {
-			t.Fatalf("first backoff not observed: %s", elapsed)
-		}
-		s.record("http_503_then_success", map[string]any{"task_id": id, "attempts": task.Notification.HTTPAttempts, "mock_calls": stats.Count, "elapsed_ms": elapsed.Milliseconds()})
-	})
-
-	t.Run("three 503 and duplicate MQ delivery", func(t *testing.T) {
-		s.configure(t, []int{503})
-		start := time.Now()
-		id := s.submit(t, "retry-exhausted", "text/plain", "must stop")
-		task := s.wait(t, id, "FAILED")
-		stats := s.stats(t)
-		elapsed := time.Since(start)
-		if task.Notification.HTTPAttempts != 3 || len(task.Attempts) != 3 || stats.Count != 3 {
-			t.Fatalf("attempts=%d rows=%d mock_calls=%d, want 3", task.Notification.HTTPAttempts, len(task.Attempts), stats.Count)
-		}
-		if task.Notification.Reason != "HTTP_ATTEMPTS_EXHAUSTED" {
-			t.Fatalf("reason=%s", task.Notification.Reason)
-		}
-		if elapsed < 50*time.Millisecond {
-			t.Fatalf("two backoffs were not observed: %s", elapsed)
-		}
-		if err := s.republish(id); err != nil {
-			t.Fatal(err)
-		}
-		time.Sleep(1500 * time.Millisecond)
-		after := s.stats(t)
-		if after.Count != 3 {
-			t.Fatalf("duplicate terminal message sent HTTP again: %d calls", after.Count)
-		}
-		s.record("three_503_terminal_duplicate_delivery", map[string]any{"task_id": id, "attempts": task.Notification.HTTPAttempts, "mock_calls": stats.Count, "after_duplicate": after.Count, "elapsed_ms": elapsed.Milliseconds()})
-	})
-
-	t.Run("fast fail and manual recovery", func(t *testing.T) {
-		s.reset(t)
-		s.fastFail(t, true)
-		old := s.submit(t, "fast-fail", "text/plain", "must not send")
-		task := s.wait(t, old, "FAST_FAILED")
-		if task.Notification.HTTPAttempts != 0 || s.stats(t).Count != 0 {
-			t.Fatal("fast fail invoked the target")
-		}
-		s.fastFail(t, false)
-		time.Sleep(1500 * time.Millisecond)
-		if got := s.task(t, old).Notification.Status; got != "FAST_FAILED" {
-			t.Fatalf("old terminal task revived: %s", got)
-		}
-		if s.stats(t).Count != 0 {
-			t.Fatal("old terminal task sent after switch disabled")
-		}
-		next := s.submit(t, "after-recovery", "text/plain", "new task")
-		s.wait(t, next, "DELIVERED")
-		if s.stats(t).Count != 1 {
-			t.Fatal("new task after recovery was not sent")
-		}
-		s.record("fast_fail_terminal_manual_recovery", map[string]any{"old_task": old, "new_task": next, "old_calls_after_recovery": 0})
-	})
-
-	t.Run("XML and form bodies remain exact", func(t *testing.T) {
-		for i, tc := range []struct{ ct, body string }{{"application/xml; charset=utf-8", "<notice><title>你好</title></notice>"}, {"application/x-www-form-urlencoded", "name=hello+world&status=%E5%B7%B2%E5%8F%91%E9%80%81"}} {
-			s.reset(t)
-			id := s.submit(t, fmt.Sprintf("raw-%d", i), tc.ct, tc.body)
-			s.wait(t, id, "DELIVERED")
-			stats := s.stats(t)
-			if stats.Count != 1 || len(stats.Items) != 1 || stats.Items[0].Body != tc.body || stats.Items[0].ContentType != tc.ct {
-				t.Fatalf("raw body mismatch: %#v", stats)
-			}
-			s.record("raw_body_"+fmt.Sprint(i), map[string]any{"task_id": id, "content_type": tc.ct})
-		}
-	})
-
-	t.Run("outbox plan and UTC storage", func(t *testing.T) {
-		rows, err := db.Query("EXPLAIN SELECT event_id, task_id, trace_id, publish_attempts FROM outbox WHERE publish_state='PENDING' AND next_attempt_at<=UTC_TIMESTAMP(6) ORDER BY next_attempt_at ASC,outbox_id ASC LIMIT 100")
-		if err != nil {
-			t.Fatal(err)
-		}
-		cols, _ := rows.Columns()
-		vals := make([]any, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range vals {
-			ptrs[i] = &vals[i]
-		}
-		if !rows.Next() {
-			t.Fatal("EXPLAIN returned no row")
-		}
-		if err := rows.Scan(ptrs...); err != nil {
-			t.Fatal(err)
-		}
-		plan := map[string]any{}
-		for i, col := range cols {
-			if raw, ok := vals[i].([]byte); ok {
-				plan[col] = string(raw)
-			} else {
-				plan[col] = vals[i]
-			}
-		}
-		rows.Close()
-		var tz string
-		if err := db.QueryRow("SELECT @@session.time_zone").Scan(&tz); err != nil {
-			t.Fatal(err)
-		}
-		s.record("outbox_explain_utc", map[string]any{"plan": plan, "runner_timezone": tz})
-	})
-
-	t.Run("database exception is redelivered by RocketMQ", s.testDatabaseExceptionReconsume)
-	t.Run("HTTP success result-write retries before MQ redelivery", s.testResultWriteFailure)
-	t.Run("HTTP success result-write exhaustion redelivers without repeating HTTP", s.testResultWriteExhaustion)
-
-	t.Run("native RocketMQ retries reach DLQ", s.testNativeDLQ)
-}
-
-func TestBrokerOutageOutboxRecoveryAndExpiry(t *testing.T) {
-	db, err := sql.Open("mysql", env(t, "TEST_DB_DSN"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	s := newSuite(t, env(t, "TEST_API_URL"), env(t, "TEST_MOCK_URL"), db, make([]map[string]any, 0))
-	defer s.writeReport()
-	control := env(t, "TEST_CONTROL_DIR")
-	marker := func(name string) string { return filepath.Join(control, "broker-outage-"+name) }
-	if err := os.WriteFile(marker("armed"), []byte(time.Now().UTC().Format(time.RFC3339Nano)), 0600); err != nil {
-		t.Fatal(err)
-	}
-	waitFile(t, marker("stopped"), 60*time.Second)
-	ready, err := s.client.Get(s.api + "/readyz")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ready.Body.Close()
-	if ready.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("readyz status during broker outage=%d, want 503", ready.StatusCode)
-	}
+func (s *suite) testMQIngressAndDemoProducer(t *testing.T, dlq *dlqObserver) {
 	s.reset(t)
-	id := s.submit(t, "broker-down-expired", "text/plain", "must expire before recovery")
-	if _, err := db.Exec(`UPDATE notification SET expires_at=UTC_TIMESTAMP(6)-INTERVAL 1 SECOND WHERE task_id=?`, id); err != nil {
+	toolDir, err := os.Getwd()
+	if err != nil {
 		t.Fatal(err)
 	}
+	eventID := "demo-fixed-" + shortID()
+	event := s.newEvent(eventID, "<notice>XML body stays raw</notice>")
+	event.Headers = map[string]string{"Content-Type": "application/xml; charset=utf-8", "X-Format": "raw"}
+	command := exec.Command("go", "run", "../../cmd/demo-producer", "-event-id", event.EventID, "-trace-id", event.TraceID,
+		"-destination", event.DestinationID, "-method", event.Method, "-content-type", event.Headers["Content-Type"],
+		"-body", event.Body, "-expires-at", event.ExpiresAt, "-count", "2")
+	command.Dir = toolDir
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("demo producer failed: %v (%s)", err, safeOutput(output))
+	}
+	if !strings.Contains(string(output), "sends=2") {
+		t.Fatalf("demo producer did not report two confirmed sends: %s", safeOutput(output))
+	}
+	taskID := s.waitTaskIDByEvent(t, event.EventID, 20*time.Second)
+	task := s.wait(t, taskID, "DELIVERED", 20*time.Second)
+	stats := s.stats(t)
+	if task.Notification.HTTPAttempts != 1 || stats.Count != 1 || stats.Requests[0].Body != event.Body || stats.Requests[0].ContentType != event.Headers["Content-Type"] {
+		t.Fatalf("duplicate MQ event or XML body mismatch: attempts=%d calls=%d content_type=%q", task.Notification.HTTPAttempts, stats.Count, stats.Requests[0].ContentType)
+	}
+	var rows int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM notification WHERE client_id=? AND source_event_id=?`, s.clientID, event.EventID).Scan(&rows); err != nil || rows != 1 {
+		t.Fatalf("notification rows=%d, query error=%v", rows, err)
+	}
+	s.contexts = append(s.contexts, [2]string{taskID, event.TraceID})
+	s.record("versioned_mq_ingress_and_demo_producer_duplicate", map[string]any{"event_id": event.EventID, "task_id": taskID, "duplicate_sends": 2, "notification_rows": rows, "http_calls": stats.Count, "body_format": "XML raw text"})
+
+	// Same event key with changed execution content is rejected without changing the stored task.
+	conflict := event
+	conflict.Body = "conflicting content must never be sent"
+	conflictRaw, _ := json.Marshal(conflict)
+	s.sendRaw(t, conflictRaw)
+	if message := dlq.waitBody(t, conflictRaw, 2*time.Minute); message.ReconsumeTimes < 2 {
+		t.Fatalf("event conflict reached DLQ after only %d retries", message.ReconsumeTimes)
+	}
+	var storedBody string
+	if err := s.db.QueryRow(`SELECT request_body FROM notification WHERE task_id=?`, taskID).Scan(&storedBody); err != nil || storedBody != event.Body {
+		t.Fatalf("conflicting content changed stored task: error=%v", err)
+	}
+	if s.stats(t).Count != 1 {
+		t.Fatal("conflict content was sent downstream")
+	}
+	s.record("same_event_id_with_changed_content_goes_to_dlq_without_overwrite", map[string]any{"task_id": taskID, "http_calls": 1})
+
+	// Form text is also passed as the original UTF-8 body and header value.
+	s.reset(t)
+	form := s.newEvent("demo-form-"+shortID(), "name=codex&note=%E4%BD%A0%E5%A5%BD")
+	form.Headers = map[string]string{"Content-Type": "application/x-www-form-urlencoded; charset=utf-8"}
+	command = exec.Command("go", "run", "../../cmd/demo-producer", "-event-id", form.EventID, "-trace-id", form.TraceID,
+		"-destination", form.DestinationID, "-method", form.Method, "-content-type", form.Headers["Content-Type"],
+		"-body", form.Body, "-expires-at", form.ExpiresAt)
+	command.Dir = toolDir
+	output, err = command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("form demo producer failed: %v (%s)", err, safeOutput(output))
+	}
+	formTaskID := s.waitTaskIDByEvent(t, form.EventID, 20*time.Second)
+	s.wait(t, formTaskID, "DELIVERED", 20*time.Second)
+	formStats := s.stats(t)
+	if formStats.Count != 1 || formStats.Requests[0].Body != form.Body || formStats.Requests[0].ContentType != form.Headers["Content-Type"] {
+		t.Fatalf("form text was not passed through: calls=%d body=%q content_type=%q", formStats.Count, formStats.Requests[0].Body, formStats.Requests[0].ContentType)
+	}
+	s.contexts = append(s.contexts, [2]string{formTaskID, form.TraceID})
+	s.record("form_body_and_content_type_are_preserved", map[string]any{"task_id": formTaskID, "http_calls": formStats.Count, "body_format": "application/x-www-form-urlencoded"})
+}
+
+func (s *suite) testConcurrentDuplicateIngress(t *testing.T) {
+	s.reset(t)
+	s.configure(t, []int{200}, 700)
+	event := s.newEvent("e2e-concurrent-"+shortID(), "one task despite concurrent duplicate events")
+	body, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const copies = 8
+	topic := env(t, "ROCKETMQ_TOPIC")
+	var group sync.WaitGroup
+	errs := make(chan error, copies)
+	for i := 0; i < copies; i++ {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			message := primitive.NewMessage(topic, body)
+			message.WithKeys([]string{event.EventID})
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			result, sendErr := s.producer.SendSync(ctx, message)
+			if sendErr != nil {
+				errs <- sendErr
+				return
+			}
+			if result == nil || result.Status != primitive.SendOK {
+				errs <- fmt.Errorf("upstream duplicate send was not confirmed: result=%v", result)
+			}
+		}()
+	}
+	group.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	id := s.waitTaskIDByEvent(t, event.EventID, 20*time.Second)
+	task := s.wait(t, id, "DELIVERED", 20*time.Second)
 	time.Sleep(2 * time.Second)
-	var publishState string
-	if err := db.QueryRow(`SELECT publish_state FROM outbox WHERE task_id=?`, id).Scan(&publishState); err != nil {
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM notification WHERE client_id=? AND source_event_id=?`, s.clientID, event.EventID).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if publishState != "PENDING" || s.stats(t).Count != 0 {
-		t.Fatalf("broker outage did not retain unpublished work: state=%s target_calls=%d", publishState, s.stats(t).Count)
+	if count != 1 || task.Notification.HTTPAttempts != 1 || s.stats(t).Count != 1 {
+		t.Fatalf("concurrent duplicate ingress created repeated work: rows=%d attempts=%d calls=%d", count, task.Notification.HTTPAttempts, s.stats(t).Count)
 	}
-	if err := os.WriteFile(marker("queued"), []byte(id), 0600); err != nil {
-		t.Fatal(err)
-	}
-	waitFile(t, marker("resume"), 60*time.Second)
-	task := s.wait(t, id, "EXPIRED")
-	time.Sleep(1200 * time.Millisecond)
-	if s.stats(t).Count != 0 || task.Notification.HTTPAttempts != 0 {
-		t.Fatal("expired task started an HTTP request after broker recovery")
-	}
-	fresh := s.submit(t, "broker-recovered-new-task", "text/plain", "recovered")
-	s.wait(t, fresh, "DELIVERED")
-	if got := s.stats(t).Count; got != 1 {
-		t.Fatalf("new task was not delivered after broker recovery: calls=%d", got)
-	}
-	var finalState string
-	if err := db.QueryRow(`SELECT publish_state FROM outbox WHERE task_id=?`, fresh).Scan(&finalState); err != nil {
-		t.Fatal(err)
-	}
-	if finalState != "PUBLISHED" {
-		t.Fatalf("recovered outbox state=%s", finalState)
-	}
-	s.record("broker_outage_outbox_recovery_and_task_expiry", map[string]any{"expired_task": id, "expired_task_calls": 0, "fresh_task": fresh, "fresh_task_calls": 1, "outbox_state": finalState})
+	s.contexts = append(s.contexts, [2]string{id, event.TraceID})
+	s.record("concurrent_duplicate_mq_events_share_one_task_and_http_call", map[string]any{"task_id": id, "messages": copies, "notification_rows": count, "http_calls": s.stats(t).Count})
 }
 
-func TestSIGTERMInterruptsInFlightDelivery(t *testing.T) {
-	db, err := sql.Open("mysql", env(t, "TEST_DB_DSN"))
+func (s *suite) testSecondAttemptSuccess(t *testing.T) {
+	s.reset(t)
+	s.configure(t, []int{503, 200}, 0)
+	event := s.newEvent("e2e-second-success-"+shortID(), "first request fails, second succeeds")
+	s.sendEvent(t, event)
+	id := s.waitTaskIDByEvent(t, event.EventID, 20*time.Second)
+	task := s.wait(t, id, "DELIVERED", 20*time.Second)
+	if task.Notification.HTTPAttempts != 2 || len(task.Attempts) != 2 || s.stats(t).Count != 2 {
+		t.Fatalf("second-attempt success mismatch: attempts=%d rows=%d calls=%d", task.Notification.HTTPAttempts, len(task.Attempts), s.stats(t).Count)
+	}
+	s.contexts = append(s.contexts, [2]string{id, event.TraceID})
+	s.record("first_http_503_then_second_attempt_success", map[string]any{"task_id": id, "http_business_attempts": 2, "mock_calls": s.stats(t).Count, "status": task.Notification.Status})
+}
+
+func (s *suite) testThreeAttemptsAndTerminalDuplicate(t *testing.T) {
+	s.reset(t)
+	s.configure(t, []int{503, 503, 503}, 0)
+	event := s.newEvent("e2e-503-"+shortID(), "retry within the three-call budget")
+	s.sendEvent(t, event)
+	id := s.waitTaskIDByEvent(t, event.EventID, 20*time.Second)
+	task := s.wait(t, id, "FAILED", 40*time.Second)
+	if task.Notification.HTTPAttempts != 3 || len(task.Attempts) != 3 || s.stats(t).Count != 3 {
+		t.Fatalf("503 attempts/calls mismatch: attempts=%d rows=%d calls=%d", task.Notification.HTTPAttempts, len(task.Attempts), s.stats(t).Count)
+	}
+	s.sendEvent(t, event)
+	time.Sleep(1500 * time.Millisecond)
+	if after := s.stats(t).Count; after != 3 {
+		t.Fatalf("terminal duplicate increased HTTP calls to %d", after)
+	}
+	s.contexts = append(s.contexts, [2]string{id, event.TraceID})
+	s.record("three_503_calls_are_terminal_and_duplicate_safe", map[string]any{"task_id": id, "http_business_attempts": task.Notification.HTTPAttempts, "mock_calls": s.stats(t).Count, "terminal": task.Notification.Status})
+}
+
+func (s *suite) testIngestCommitBeforeAttempt(t *testing.T, retry *retryObserver) {
+	s.reset(t)
+	if _, err := s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_first_attempt`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`DROP TABLE IF EXISTS e2e_attempt_gate`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`CREATE TABLE e2e_attempt_gate (id INT PRIMARY KEY, failures INT NOT NULL) ENGINE=MyISAM`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO e2e_attempt_gate (id, failures) VALUES (1, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	event := s.newEvent("e2e-before-http-"+shortID(), "must be sent only after its attempt is persisted")
+	id := s.ingestForFaultTest(t, event, s.clientID)
+	if _, err := s.db.Exec(`CREATE TRIGGER e2e_fail_first_attempt BEFORE INSERT ON delivery_attempt FOR EACH ROW BEGIN
+		IF NEW.task_id = '` + id + `' THEN
+			UPDATE e2e_attempt_gate SET failures = failures + 1 WHERE id = 1;
+			IF (SELECT failures FROM e2e_attempt_gate WHERE id = 1) = 1 THEN
+				SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'controlled pre-HTTP attempt persistence failure';
+			END IF;
+		END IF;
+	END`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_first_attempt`)
+		_, _ = s.db.Exec(`DROP TABLE IF EXISTS e2e_attempt_gate`)
+	}()
+	s.sendEvent(t, event)
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		var failures int
+		if err := s.db.QueryRow(`SELECT failures FROM e2e_attempt_gate WHERE id=1`).Scan(&failures); err != nil {
+			t.Fatal(err)
+		}
+		if failures > 0 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	var failures int
+	if err := s.db.QueryRow(`SELECT failures FROM e2e_attempt_gate WHERE id=1`).Scan(&failures); err != nil || failures != 1 {
+		t.Fatalf("pre-HTTP failure trigger calls=%d, error=%v", failures, err)
+	}
+	if s.stats(t).Count != 0 {
+		t.Fatal("HTTP was called before attempt persistence succeeded")
+	}
+	if _, err := s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_first_attempt`); err != nil {
+		t.Fatal(err)
+	}
+	retryMsg := retry.wait(t, event.EventID, 30*time.Second)
+	if got := s.waitTaskIDByEvent(t, event.EventID, 20*time.Second); got != id {
+		t.Fatalf("redelivery changed task ID from %s to %s", id, got)
+	}
+	task := s.wait(t, id, "DELIVERED", 45*time.Second)
+	var rows int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM notification WHERE client_id=? AND source_event_id=?`, s.clientID, event.EventID).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 || task.Notification.HTTPAttempts != 1 || s.stats(t).Count != 1 || retryMsg.ReconsumeTimes < 1 {
+		t.Fatalf("pre-HTTP recovery mismatch: rows=%d attempts=%d calls=%d reconsume=%d", rows, task.Notification.HTTPAttempts, s.stats(t).Count, retryMsg.ReconsumeTimes)
+	}
+	s.contexts = append(s.contexts, [2]string{id, event.TraceID})
+	s.record("persisted_task_before_http_recovers_on_native_redelivery", map[string]any{"task_id": id, "notification_rows": rows, "http_calls": 1, "mq_reconsume": retryMsg.ReconsumeTimes, "final_status": task.Notification.Status})
+}
+
+func (s *suite) testNotificationInsertFailure(t *testing.T, retry *retryObserver) {
+	s.reset(t)
+	if _, err := s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_first_notification_insert`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`DROP TABLE IF EXISTS e2e_ingest_gate`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`CREATE TABLE e2e_ingest_gate (id INT PRIMARY KEY, failures INT NOT NULL) ENGINE=MyISAM`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO e2e_ingest_gate (id, failures) VALUES (1, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`CREATE TRIGGER e2e_fail_first_notification_insert BEFORE INSERT ON notification FOR EACH ROW BEGIN
+		IF NEW.source_event_id LIKE 'e2e-ingest-fail-%' THEN
+			UPDATE e2e_ingest_gate SET failures = failures + 1 WHERE id = 1;
+			IF (SELECT failures FROM e2e_ingest_gate WHERE id = 1) = 1 THEN
+				SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'controlled notification insert failure';
+			END IF;
+		END IF;
+	END`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_first_notification_insert`)
+		_, _ = s.db.Exec(`DROP TABLE IF EXISTS e2e_ingest_gate`)
+	}()
+	event := s.newEvent("e2e-ingest-fail-"+shortID(), "no HTTP before task commit")
+	s.sendEvent(t, event)
+	retryMsg := retry.wait(t, event.EventID, 30*time.Second)
+	id := s.waitTaskIDByEvent(t, event.EventID, 25*time.Second)
+	task := s.wait(t, id, "DELIVERED", 25*time.Second)
+	if task.Notification.HTTPAttempts != 1 || s.stats(t).Count != 1 || retryMsg.ReconsumeTimes < 1 {
+		t.Fatalf("ingest recovery mismatch: attempts=%d calls=%d reconsume=%d", task.Notification.HTTPAttempts, s.stats(t).Count, retryMsg.ReconsumeTimes)
+	}
+	s.contexts = append(s.contexts, [2]string{id, event.TraceID})
+	s.record("notification_insert_failure_retries_before_http", map[string]any{"task_id": id, "http_calls": 1, "mq_reconsume": retryMsg.ReconsumeTimes})
+}
+
+func (s *suite) testTerminalPoliciesAndAdmin(t *testing.T) {
+	s.reset(t)
+	s.fastFail(t, true)
+	fast := s.newEvent("e2e-fast-fail-"+shortID(), "fast failure must not call HTTP")
+	s.sendEvent(t, fast)
+	fastID := s.waitTaskIDByEvent(t, fast.EventID, 15*time.Second)
+	fastTask := s.wait(t, fastID, "FAST_FAILED", 15*time.Second)
+	if fastTask.Notification.HTTPAttempts != 0 || s.stats(t).Count != 0 {
+		t.Fatalf("fast-failed task called HTTP: attempts=%d calls=%d", fastTask.Notification.HTTPAttempts, s.stats(t).Count)
+	}
+	s.fastFail(t, false)
+	newEvent := s.newEvent("e2e-fast-fail-off-"+shortID(), "new event after the switch closes")
+	s.sendEvent(t, newEvent)
+	newID := s.waitTaskIDByEvent(t, newEvent.EventID, 15*time.Second)
+	newTask := s.wait(t, newID, "DELIVERED", 15*time.Second)
+	s.sendEvent(t, fast)
+	time.Sleep(1200 * time.Millisecond)
+	if s.stats(t).Count != 1 || fastTask.Notification.Status != "FAST_FAILED" {
+		t.Fatal("closing fast-fail revived an old terminal task")
+	}
+
+	expired := s.newEvent("e2e-expired-"+shortID(), "expired body")
+	expired.ExpiresAt = time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
+	s.sendEvent(t, expired)
+	expiredID := s.waitTaskIDByEvent(t, expired.EventID, 15*time.Second)
+	expiredTask := s.wait(t, expiredID, "EXPIRED", 15*time.Second)
+	if expiredTask.Notification.HTTPAttempts != 0 || s.stats(t).Count != 1 {
+		t.Fatal("expired task should not start an HTTP attempt")
+	}
+
+	failed := s.newEvent("e2e-resolve-"+shortID(), "manual resolution only records a conclusion")
+	s.configure(t, []int{400}, 0)
+	s.sendEvent(t, failed)
+	failedID := s.waitTaskIDByEvent(t, failed.EventID, 15*time.Second)
+	failedTask := s.wait(t, failedID, "FAILED", 15*time.Second)
+	if err := s.resolve(t, failedID, "supplier confirmed permanent rejection"); err != nil {
+		t.Fatal(err)
+	}
+	resolved := s.task(t, failedID)
+	if resolved.Notification.Status != "FAILED" || resolved.Notification.Resolution == "" {
+		t.Fatalf("manual conclusion changed terminal semantics: status=%s resolution=%q", resolved.Notification.Status, resolved.Notification.Resolution)
+	}
+	for _, item := range [][2]string{{fastID, fast.TraceID}, {newID, newEvent.TraceID}, {expiredID, expired.TraceID}, {failedID, failed.TraceID}} {
+		s.contexts = append(s.contexts, item)
+	}
+	s.record("fast_fail_expiry_and_admin_resolution", map[string]any{"fast_fail_calls": 0, "new_event_after_close": newTask.Notification.Status, "old_fast_fail_remains": fastTask.Notification.Status, "expired_status": expiredTask.Notification.Status, "manual_resolution_preserves_status": failedTask.Notification.Status})
+}
+
+func (s *suite) testResultWriteFailure(t *testing.T, retry *retryObserver) {
+	s.reset(t)
+	if _, err := s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_delivered_result`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`DROP TABLE IF EXISTS e2e_result_gate`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`CREATE TABLE e2e_result_gate (id INT PRIMARY KEY, writes INT NOT NULL) ENGINE=MyISAM`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO e2e_result_gate (id, writes) VALUES (1, 0)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`CREATE TRIGGER e2e_fail_delivered_result BEFORE UPDATE ON notification FOR EACH ROW BEGIN
+		IF NEW.status = 'DELIVERED' THEN
+			UPDATE e2e_result_gate SET writes = writes + 1 WHERE id = 1;
+			IF (SELECT writes FROM e2e_result_gate WHERE id = 1) <= 3 THEN
+				SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'controlled terminal result save failure';
+			END IF;
+		END IF;
+	END`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_delivered_result`)
+		_, _ = s.db.Exec(`DROP TABLE IF EXISTS e2e_result_gate`)
+	}()
+	s.configure(t, []int{200}, 0)
+	event := s.newEvent("e2e-result-write-"+shortID(), "successful remote action must not be repeated")
+	s.sendEvent(t, event)
+	retryMsg := retry.wait(t, event.EventID, 30*time.Second)
+	id := s.waitTaskIDByEvent(t, event.EventID, 20*time.Second)
+	task := s.wait(t, id, "UNCERTAIN", 25*time.Second)
+	if retryMsg.ReconsumeTimes < 1 || task.Notification.HTTPAttempts != 1 || s.stats(t).Count != 1 || len(task.Attempts) != 1 || task.Attempts[0].State != "UNKNOWN" {
+		t.Fatalf("write-result failure repeated or misrecorded request: reconsume=%d attempts=%d calls=%d state=%v", retryMsg.ReconsumeTimes, task.Notification.HTTPAttempts, s.stats(t).Count, task.Attempts)
+	}
+	s.contexts = append(s.contexts, [2]string{id, event.TraceID})
+	s.record("external_success_then_result_write_failure_becomes_uncertain_without_resend", map[string]any{"task_id": id, "http_calls": 1, "mq_reconsume": retryMsg.ReconsumeTimes, "status": task.Notification.Status})
+}
+
+func (s *suite) testNativeDLQPaths(t *testing.T, dlq *dlqObserver) {
+	s.reset(t)
+	badJSON := []byte(`{"schema_version":`)
+	s.sendRaw(t, badJSON)
+	badMessage := dlq.waitBody(t, badJSON, 2*time.Minute)
+	if badMessage.ReconsumeTimes < 2 {
+		t.Fatalf("invalid JSON reached DLQ after only %d retries", badMessage.ReconsumeTimes)
+	}
+
+	unknown := s.newEvent("e2e-unknown-version-"+shortID(), "unknown schema")
+	unknown.SchemaVersion = 99
+	unknownRaw, _ := json.Marshal(unknown)
+	s.sendRaw(t, unknownRaw)
+	unknownMessage := dlq.waitBody(t, unknownRaw, 2*time.Minute)
+	if unknownMessage.ReconsumeTimes < 2 {
+		t.Fatalf("unknown schema reached DLQ after only %d retries", unknownMessage.ReconsumeTimes)
+	}
+
+	conflict := s.newEvent("e2e-conflict-dlq-"+shortID(), "original body")
+	s.configure(t, []int{200}, 0)
+	s.sendEvent(t, conflict)
+	conflictID := s.waitTaskIDByEvent(t, conflict.EventID, 15*time.Second)
+	s.wait(t, conflictID, "DELIVERED", 15*time.Second)
+	changed := conflict
+	changed.Body = "conflicting body must not overwrite or send"
+	changedRaw, _ := json.Marshal(changed)
+	s.sendRaw(t, changedRaw)
+	conflictMessage := dlq.waitBody(t, changedRaw, 2*time.Minute)
+	if conflictMessage.ReconsumeTimes < 2 {
+		t.Fatalf("event conflict reached DLQ after only %d retries", conflictMessage.ReconsumeTimes)
+	}
+	var storedBody string
+	if err := s.db.QueryRow(`SELECT request_body FROM notification WHERE task_id=?`, conflictID).Scan(&storedBody); err != nil || storedBody != conflict.Body {
+		t.Fatalf("conflicting content changed stored task: error=%v", err)
+	}
+	if s.stats(t).Count != 1 {
+		t.Fatalf("conflict content was sent downstream, calls=%d", s.stats(t).Count)
+	}
+	s.contexts = append(s.contexts, [2]string{conflictID, conflict.TraceID})
+
+	// Permanent attempt-store failure proves execution errors use the same native DLQ path.
+	preingested := s.newEvent("e2e-execution-dlq-"+shortID(), "no request while DB attempt insert fails")
+	preingestedTask := s.ingestForFaultTest(t, preingested, s.clientID)
+	if _, err := s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_permanent_attempt`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`CREATE TRIGGER e2e_fail_permanent_attempt BEFORE INSERT ON delivery_attempt FOR EACH ROW BEGIN
+		IF NEW.task_id = '` + preingestedTask + `' THEN
+			SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'controlled permanent attempt database failure';
+		END IF;
+	END`); err != nil {
+		t.Fatal(err)
+	}
+	s.sendEvent(t, preingested)
+	failedAttemptMessage := dlq.waitEvent(t, preingested.EventID, 2*time.Minute)
+	if failedAttemptMessage.ReconsumeTimes < 2 {
+		t.Fatalf("execution error reached DLQ after only %d retries", failedAttemptMessage.ReconsumeTimes)
+	}
+	_, _ = s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_permanent_attempt`)
+	var status string
+	var attempts int
+	if err := s.db.QueryRow(`SELECT status, http_attempts FROM notification WHERE task_id=?`, preingestedTask).Scan(&status, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if status != "PENDING" || attempts != 0 || s.stats(t).Count != 1 {
+		t.Fatalf("execution DLQ task changed unexpectedly: status=%s attempts=%d calls=%d", status, attempts, s.stats(t).Count)
+	}
+	s.record("invalid_version_conflict_and_execution_errors_reach_native_dlq", map[string]any{"invalid_json_reconsume": badMessage.ReconsumeTimes, "unknown_version_reconsume": unknownMessage.ReconsumeTimes, "conflict_reconsume": conflictMessage.ReconsumeTimes, "execution_error_reconsume": failedAttemptMessage.ReconsumeTimes, "conflicting_body_sent": false, "execution_dlq_task_status": status})
+}
+
+func (s *suite) testClientScopedEventKeys(t *testing.T) {
+	// The database constraint is scoped to (trusted client, source event ID). This test
+	// exercises a second configured identity directly without claiming a second MQ auth source.
+	event := s.newEvent("e2e-scoped-"+shortID(), "identity scope test")
+	idA := s.ingestForFaultTest(t, event, "upstream-a")
+	idB := s.ingestForFaultTest(t, event, "upstream-b")
+	if idA == idB {
+		t.Fatal("same event ID from distinct trusted clients collided")
+	}
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM notification WHERE source_event_id=? AND client_id IN ('upstream-a','upstream-b')`, event.EventID).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("scoped event rows=%d, error=%v", count, err)
+	}
+	s.record("event_identity_is_scoped_by_trusted_client", map[string]any{"same_event_id": true, "distinct_clients": 2, "distinct_task_ids": true})
+}
+
+func (s *suite) ingestForFaultTest(t *testing.T, event mq.IngressEvent, clientID string) string {
+	t.Helper()
+	expiresAt, err := time.Parse(time.RFC3339Nano, event.ExpiresAt)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-	s := newSuite(t, env(t, "TEST_API_URL"), env(t, "TEST_MOCK_URL"), db, make([]map[string]any, 0))
-	defer s.writeReport()
-	control := env(t, "TEST_CONTROL_DIR")
-	marker := func(name string) string { return filepath.Join(control, "sigterm-"+name) }
-	s.reset(t)
-	s.configureDelay(t, []int{200}, 10000)
-	id := s.submit(t, "sigterm-in-flight", "text/plain", "interrupted once")
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		view := s.task(t, id)
-		stats := s.stats(t)
-		if view.Notification.Status == "PROCESSING" && stats.Count == 1 && len(view.Attempts) == 1 && view.Attempts[0].State == "STARTED" {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	view := s.task(t, id)
-	if view.Notification.Status != "PROCESSING" || len(view.Attempts) != 1 || view.Attempts[0].State != "STARTED" || s.stats(t).Count != 1 {
-		t.Fatalf("HTTP request was not in flight before SIGTERM: status=%s attempts=%#v calls=%d", view.Notification.Status, view.Attempts, s.stats(t).Count)
-	}
-	if err := os.WriteFile(marker("armed"), []byte(id), 0600); err != nil {
-		t.Fatal(err)
-	}
-	waitFile(t, marker("stopped"), 60*time.Second)
-	waitFile(t, marker("resume"), 60*time.Second)
-	deadline = time.Now().Add(2 * time.Minute)
-	for time.Now().Before(deadline) {
-		view = s.task(t, id)
-		if view.Notification.Status == "UNCERTAIN" {
-			break
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	stats := s.stats(t)
-	if view.Notification.Status != "UNCERTAIN" || view.Notification.HTTPAttempts != 1 || stats.Count != 1 || len(view.Attempts) != 1 || view.Attempts[0].State != "UNKNOWN" {
-		t.Fatalf("SIGTERM recovery mismatch: status=%s attempts=%d calls=%d rows=%#v", view.Notification.Status, view.Notification.HTTPAttempts, stats.Count, view.Attempts)
-	}
-	s.record("sigterm_interrupts_inflight_http_and_redelivery_does_not_repeat", map[string]any{"task_id": id, "status_after_restart": view.Notification.Status, "http_attempts": view.Notification.HTTPAttempts, "mock_calls": stats.Count, "attempt_state": view.Attempts[0].State})
-}
-
-func waitFile(t *testing.T, path string, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(path); err == nil {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for host verification marker %s", filepath.Base(path))
-}
-
-func (s *suite) testDatabaseExceptionReconsume(t *testing.T) {
-	s.reset(t)
-	observer := s.observeRetryTopic(t)
-	if _, err := s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_processing`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.Exec(`CREATE TRIGGER e2e_fail_processing BEFORE UPDATE ON notification FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='controlled integration failure'`); err != nil {
-		t.Fatal(err)
-	}
-	drop := func() { _, _ = s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_processing`) }
-	t.Cleanup(drop)
-	id := s.submit(t, "db-exception-redelivery", "text/plain", "only after database recovers")
-	message := observer.waitTask(t, id, 30*time.Second)
-	drop()
-	task := s.wait(t, id, "DELIVERED")
-	stats := s.stats(t)
-	if message.ReconsumeTimes < 1 || task.Notification.HTTPAttempts != 1 || stats.Count != 1 {
-		t.Fatalf("native recovery mismatch: reconsume=%d attempts=%d calls=%d", message.ReconsumeTimes, task.Notification.HTTPAttempts, stats.Count)
-	}
-	var published string
-	if err := s.db.QueryRow(`SELECT publish_state FROM outbox WHERE task_id=?`, id).Scan(&published); err != nil {
-		t.Fatal(err)
-	}
-	if published != "PUBLISHED" {
-		t.Fatalf("outbox state=%s", published)
-	}
-	s.record("database_exception_native_redelivery", map[string]any{"task_id": id, "mq_reconsume": message.ReconsumeTimes, "http_attempts": task.Notification.HTTPAttempts, "mock_calls": stats.Count, "outbox_state": published})
-}
-
-func (s *suite) testResultWriteFailure(t *testing.T) {
-	s.reset(t)
-	if _, err := s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_delivered`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.Exec(`DROP TABLE IF EXISTS e2e_result_write_failures`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.Exec(`CREATE TABLE e2e_result_write_failures (id INT PRIMARY KEY, writes INT NOT NULL) ENGINE=MyISAM`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.Exec(`INSERT INTO e2e_result_write_failures (id, writes) VALUES (1, 0)`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.Exec(`CREATE TRIGGER e2e_fail_delivered BEFORE UPDATE ON notification FOR EACH ROW BEGIN
-		DECLARE write_count INT;
-		IF NEW.status = 'DELIVERED' THEN
-			UPDATE e2e_result_write_failures SET writes = writes + 1 WHERE id = 1;
-			SELECT writes INTO write_count FROM e2e_result_write_failures WHERE id = 1;
-			IF write_count <= 2 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'controlled transient result write failure'; END IF;
-		END IF;
-	END`); err != nil {
-		t.Fatal(err)
-	}
-	drop := func() {
-		_, _ = s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_delivered`)
-		_, _ = s.db.Exec(`DROP TABLE IF EXISTS e2e_result_write_failures`)
-	}
-	t.Cleanup(drop)
-	s.configure(t, []int{200})
-	start := time.Now()
-	id := s.submit(t, "external-ok-write-fails", "text/plain", "do not send twice")
-	task := s.wait(t, id, "DELIVERED")
-	stats := s.stats(t)
-	if stats.Count != 1 {
-		t.Fatalf("HTTP result persistence retried the external request: calls=%d", stats.Count)
-	}
-	var writes int
-	if err := s.db.QueryRow(`SELECT writes FROM e2e_result_write_failures WHERE id = 1`).Scan(&writes); err != nil {
-		t.Fatal(err)
-	}
-	elapsed := time.Since(start)
-	if writes != 3 || task.Notification.Status != "DELIVERED" || task.Notification.HTTPAttempts != 1 || len(task.Attempts) != 1 || task.Attempts[0].State != "SUCCEEDED" || elapsed < 140*time.Millisecond {
-		t.Fatalf("result write retries mismatch: writes=%d attempts=%d rows=%#v", writes, task.Notification.HTTPAttempts, task.Attempts)
-	}
-	drop()
-	s.record("external_success_result_write_retried_without_repeating_http", map[string]any{"task_id": id, "result_write_attempts": writes, "http_attempts": task.Notification.HTTPAttempts, "mock_calls": stats.Count, "attempt_state": task.Attempts[0].State, "result": task.Notification.Status, "elapsed_ms": elapsed.Milliseconds()})
-}
-
-func (s *suite) testOutboxMarkFailure(t *testing.T) {
-	s.reset(t)
-	if _, err := s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_outbox_mark`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.Exec(`DROP TABLE IF EXISTS e2e_outbox_mark_failures`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.Exec(`CREATE TABLE e2e_outbox_mark_failures (
-		id INT PRIMARY KEY, failures INT NOT NULL, first_at DATETIME(6) NULL, second_at DATETIME(6) NULL
-	) ENGINE=MyISAM`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.Exec(`INSERT INTO e2e_outbox_mark_failures (id, failures) VALUES (1, 0)`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.Exec(`CREATE TRIGGER e2e_fail_outbox_mark BEFORE UPDATE ON outbox FOR EACH ROW BEGIN
-		IF OLD.publish_state = 'PENDING' AND NEW.publish_state = 'PUBLISHED' THEN
-			UPDATE e2e_outbox_mark_failures SET
-				first_at = IF(failures = 0, UTC_TIMESTAMP(6), first_at),
-				second_at = IF(failures = 1, UTC_TIMESTAMP(6), second_at),
-				failures = failures + 1 WHERE id = 1;
-			SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'controlled outbox acknowledgement update failure';
-		END IF;
-	END`); err != nil {
-		t.Fatal(err)
-	}
-	drop := func() {
-		_, _ = s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_outbox_mark`)
-		_, _ = s.db.Exec(`DROP TABLE IF EXISTS e2e_outbox_mark_failures`)
-	}
-	t.Cleanup(drop)
-	s.configure(t, []int{200})
-	id := s.submit(t, "outbox-mark-fails-after-send", "text/plain", "same event may be published again")
-	task := s.wait(t, id, "DELIVERED")
-	deadline := time.Now().Add(10 * time.Second)
-	var markFailures int
-	for time.Now().Before(deadline) {
-		if err := s.db.QueryRow(`SELECT failures FROM e2e_outbox_mark_failures WHERE id = 1`).Scan(&markFailures); err != nil {
-			t.Fatal(err)
-		}
-		if markFailures >= 2 {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if markFailures < 2 {
-		t.Fatalf("outbox mark failure did not cause repeated publish attempts: failures=%d", markFailures)
-	}
-	var firstMarkFailure, secondMarkFailure time.Time
-	if err := s.db.QueryRow(`SELECT first_at, second_at FROM e2e_outbox_mark_failures WHERE id = 1`).Scan(&firstMarkFailure, &secondMarkFailure); err != nil {
-		t.Fatal(err)
-	}
-	markRetryDelay := secondMarkFailure.Sub(firstMarkFailure)
-	if markRetryDelay < 800*time.Millisecond {
-		t.Fatalf("outbox mark failure retry was not backed off: interval=%s", markRetryDelay)
-	}
-	drop()
-	deadline = time.Now().Add(10 * time.Second)
-	var publishState string
-	for time.Now().Before(deadline) {
-		if err := s.db.QueryRow(`SELECT publish_state FROM outbox WHERE task_id = ?`, id).Scan(&publishState); err != nil {
-			t.Fatal(err)
-		}
-		if publishState == "PUBLISHED" {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if publishState != "PUBLISHED" {
-		t.Fatalf("outbox did not mark published after database recovery: %s", publishState)
-	}
-	time.Sleep(1500 * time.Millisecond)
-	stats := s.stats(t)
-	if stats.Count != 1 || task.Notification.HTTPAttempts != 1 {
-		t.Fatalf("duplicate published events repeated HTTP: calls=%d attempts=%d", stats.Count, task.Notification.HTTPAttempts)
-	}
-	s.record("outbox_send_mark_failure_duplicate_safe", map[string]any{"task_id": id, "local_mark_failures": markFailures, "mark_retry_interval_ms": markRetryDelay.Milliseconds(), "outbox_state_after_recovery": publishState, "mock_calls_after_duplicate_window": stats.Count, "http_attempts": task.Notification.HTTPAttempts})
-}
-
-func (s *suite) testPersistedRetryDue(t *testing.T) {
-	s.reset(t)
-	s.configureRetryAfter(t, []int{503, 200}, "2")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	repository, err := store.Open(ctx, env(t, "TEST_DB_DSN"))
+	// Use the same production validation and store path; no HTTP send is started here.
+	repository, err := store.Open(context.Background(), env(t, "TEST_DB_DSN"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer repository.Close()
-	taskID, err := notification.NewID()
+	service, err := notification.NewService(repository, "http://mock-target:8090")
 	if err != nil {
 		t.Fatal(err)
 	}
-	traceID := "retry-due-" + taskID[:8]
-	_, err = s.db.Exec(`INSERT INTO notification
-		(task_id, client_id, idempotency_key, request_fingerprint, destination_id, http_method, request_headers, request_body, trace_id, status, http_attempts, created_at, updated_at, expires_at)
-		VALUES (?, 'integration-test', ?, ?, 'mock-target', 'POST', JSON_OBJECT(), ?, ?, 'PENDING', 0, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6), ?)`,
-		taskID, "retry-due-"+taskID, make([]byte, 32), []byte("persist retry due"), traceID, time.Now().UTC().Add(2*time.Minute))
+	n, _, err := service.Ingest(context.Background(), clientID, event.EventID, event.TraceID, expiresAt,
+		notificationInput(event), 256*1024, 16*1024, 2*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine := delivery.New(config.Config{
-		HTTPTimeout: 1 * time.Second, DeliveryBudget: 20 * time.Second,
-		Backoffs: []time.Duration{20 * time.Millisecond, 40 * time.Millisecond},
-	}, repository, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	event := mq.Event{EventID: taskID, TaskID: taskID, TraceID: traceID}
-	processCtx, stopFirst := context.WithCancel(context.Background())
-	firstDone := make(chan error, 1)
-	go func() { firstDone <- engine.Process(processCtx, event, 0) }()
-	deadline := time.Now().Add(5 * time.Second)
-	var due sql.NullTime
+	return n.ID
+}
+
+func notificationInput(event mq.IngressEvent) notification.Input {
+	return notification.Input{
+		DestinationID: event.DestinationID,
+		Method:        event.Method,
+		Headers:       event.Headers,
+		Body:          event.Body,
+	}
+}
+
+func (s *suite) newEvent(eventID, body string) mq.IngressEvent {
+	return mq.IngressEvent{
+		SchemaVersion: mq.IngressSchemaVersion,
+		EventID:       eventID, TraceID: "trace-" + shortID(), DestinationID: "mock-target",
+		Method: http.MethodPost, Headers: map[string]string{"Content-Type": "text/plain; charset=utf-8"},
+		Body: body, ExpiresAt: time.Now().UTC().Add(90 * time.Second).Truncate(time.Second).Format(time.RFC3339Nano),
+	}
+}
+
+func (s *suite) sendEvent(t *testing.T, event mq.IngressEvent) {
+	t.Helper()
+	body, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.sendRaw(t, body)
+}
+
+func (s *suite) sendRaw(t *testing.T, body []byte) {
+	t.Helper()
+	message := primitive.NewMessage(env(t, "ROCKETMQ_TOPIC"), body)
+	if event, err := mq.DecodeEvent(body, 1024*1024); err == nil && event.EventID != "" {
+		message.WithKeys([]string{event.EventID})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, err := s.producer.SendSync(ctx, message)
+	if err != nil || result == nil || result.Status != primitive.SendOK {
+		t.Fatalf("upstream message was not confirmed: status=%v error=%v", result, err)
+	}
+}
+
+func (s *suite) waitTaskIDByEvent(t *testing.T, eventID string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		var attempts int
-		if err := s.db.QueryRow(`SELECT next_attempt_at, http_attempts FROM notification WHERE task_id = ?`, taskID).Scan(&due, &attempts); err != nil {
+		var id string
+		err := s.db.QueryRow(`SELECT task_id FROM notification WHERE client_id=? AND source_event_id=?`, s.clientID, eventID).Scan(&id)
+		if err == nil {
+			return id
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
 			t.Fatal(err)
-		}
-		if due.Valid && attempts == 1 {
-			break
-		}
-		select {
-		case err := <-firstDone:
-			t.Fatalf("first Process returned before retry due was stored: %v", err)
-		default:
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if !due.Valid {
-		t.Fatal("retry due was not persisted")
-	}
-	stopFirst()
-	if err := <-firstDone; err == nil {
-		t.Fatal("canceled processing unexpectedly acknowledged before retry due")
-	}
-	if count := s.stats(t).Count; count != 1 {
-		t.Fatalf("first processing call count=%d, want 1", count)
-	}
-	secondCtx, stopSecond := context.WithTimeout(context.Background(), 10*time.Second)
-	defer stopSecond()
-	secondDone := make(chan error, 1)
-	go func() { secondDone <- engine.Process(secondCtx, event, 1) }()
-	for time.Now().Before(due.Time.Add(-100 * time.Millisecond)) {
-		if count := s.stats(t).Count; count != 1 {
-			t.Fatalf("persisted retry due was bypassed: mock calls=%d before %s", count, due.Time.Format(time.RFC3339Nano))
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if err := <-secondDone; err != nil {
-		t.Fatalf("second processing invocation: %v", err)
-	}
-	var status string
-	var httpAttempts int
-	if err := s.db.QueryRow(`SELECT status, http_attempts FROM notification WHERE task_id = ?`, taskID).Scan(&status, &httpAttempts); err != nil {
-		t.Fatal(err)
-	}
-	stats := s.stats(t)
-	if status != "DELIVERED" || httpAttempts != 2 || stats.Count != 2 {
-		t.Fatalf("persisted retry result mismatch: status=%s attempts=%d calls=%d", status, httpAttempts, stats.Count)
-	}
-	s.record("persisted_retry_due_survives_context_cancellation", map[string]any{"task_id": taskID, "due_at": due.Time.UTC(), "http_attempts": httpAttempts, "mock_calls": stats.Count, "result": status})
+	t.Fatalf("event %s was not committed within %s", eventID, timeout)
+	return ""
 }
 
-func (s *suite) testResolutionDatabaseFailure(t *testing.T) {
-	s.reset(t)
-	s.configure(t, []int{400})
-	id := s.submit(t, "resolution-db-error", "text/plain", "terminal failure")
-	s.wait(t, id, "FAILED")
-	if _, err := s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_resolution`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.Exec(`CREATE TRIGGER e2e_fail_resolution BEFORE UPDATE ON notification FOR EACH ROW BEGIN
-		IF NEW.resolved_by IS NOT NULL AND (OLD.resolved_by IS NULL OR NEW.resolved_by <> OLD.resolved_by) THEN
-			SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'controlled resolution database failure';
-		END IF;
-	END`); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _, _ = s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_resolution`) })
-	body, _ := json.Marshal(map[string]string{"conclusion": "verified"})
-	req, _ := http.NewRequest(http.MethodPost, s.api+"/api/v1/admin/notifications/"+id+"/resolve", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.admin)
-	resp := s.doAPI(t, req, true)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("resolution database failure status=%d, want 500", resp.StatusCode)
-	}
-	if _, err := s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_resolution`); err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	retryReq, _ := http.NewRequest(http.MethodPost, s.api+"/api/v1/admin/notifications/"+id+"/resolve", bytes.NewReader(body))
-	retryReq.Header.Set("Content-Type", "application/json")
-	retryReq.Header.Set("Authorization", "Bearer "+s.admin)
-	resp = s.doAPI(t, retryReq, true)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("resolution after database recovery status=%d, want 200", resp.StatusCode)
-	}
-	var actor string
-	if err := s.db.QueryRow(`SELECT resolved_by FROM notification WHERE task_id = ?`, id).Scan(&actor); err != nil {
-		t.Fatal(err)
-	}
-	if actor != env(t, "TEST_ADMIN_ACTOR") {
-		t.Fatalf("resolution audit actor=%q, want %q", actor, env(t, "TEST_ADMIN_ACTOR"))
-	}
-	s.record("resolution_database_failure_maps_to_500_then_recovers", map[string]any{"task_id": id, "first_http_status": http.StatusInternalServerError, "recovered_http_status": http.StatusOK, "audit_actor": actor})
-}
-
-func (s *suite) testResultWriteExhaustion(t *testing.T) {
-	s.reset(t)
-	if _, err := s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_delivered_exhaustion`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.Exec(`DROP TABLE IF EXISTS e2e_result_write_exhaustion`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.Exec(`CREATE TABLE e2e_result_write_exhaustion (id INT PRIMARY KEY, writes INT NOT NULL) ENGINE=MyISAM`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.Exec(`INSERT INTO e2e_result_write_exhaustion (id, writes) VALUES (1, 0)`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.db.Exec(`CREATE TRIGGER e2e_fail_delivered_exhaustion BEFORE UPDATE ON notification FOR EACH ROW BEGIN
-		DECLARE write_count INT;
-		IF NEW.status = 'DELIVERED' THEN
-			UPDATE e2e_result_write_exhaustion SET writes = writes + 1 WHERE id = 1;
-			SELECT writes INTO write_count FROM e2e_result_write_exhaustion WHERE id = 1;
-			IF write_count <= 3 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'controlled permanent result write failure'; END IF;
-		END IF;
-	END`); err != nil {
-		t.Fatal(err)
-	}
-	drop := func() {
-		_, _ = s.db.Exec(`DROP TRIGGER IF EXISTS e2e_fail_delivered_exhaustion`)
-		_, _ = s.db.Exec(`DROP TABLE IF EXISTS e2e_result_write_exhaustion`)
-	}
-	t.Cleanup(drop)
-	observer := s.observeRetryTopic(t)
-	s.configure(t, []int{200})
-	id := s.submit(t, "external-ok-result-write-exhausted", "text/plain", "do not repeat successful HTTP")
-	retryMessage := observer.waitTask(t, id, 30*time.Second)
-	var writes int
-	if err := s.db.QueryRow(`SELECT writes FROM e2e_result_write_exhaustion WHERE id = 1`).Scan(&writes); err != nil {
-		t.Fatal(err)
-	}
-	if writes != 3 {
-		t.Fatalf("result persistence attempts=%d, want bounded total of 3", writes)
-	}
-	drop()
-	task := s.wait(t, id, "UNCERTAIN")
-	if retryMessage.ReconsumeTimes < 1 || len(task.Attempts) != 1 || task.Attempts[0].State != "UNKNOWN" {
-		t.Fatalf("recovery did not preserve unknown external result: reconsume=%d attempts=%#v", retryMessage.ReconsumeTimes, task.Attempts)
-	}
-	time.Sleep(1500 * time.Millisecond)
-	stats := s.stats(t)
-	if stats.Count != 1 || task.Notification.HTTPAttempts != 1 {
-		t.Fatalf("MQ redelivery repeated an externally successful request: calls=%d attempts=%d", stats.Count, task.Notification.HTTPAttempts)
-	}
-	s.record("external_success_result_write_exhaustion_no_http_repeat", map[string]any{"task_id": id, "result_write_attempts": writes, "mq_reconsume": retryMessage.ReconsumeTimes, "http_attempts": task.Notification.HTTPAttempts, "mock_calls_after_duplicate_window": stats.Count, "attempt_state": task.Attempts[0].State, "result": task.Notification.Status})
-}
-
-func (s *suite) testConcurrentLogContext(t *testing.T) {
-	s.reset(t)
-	s.configureDelay(t, []int{200}, 500)
-	const taskCount = 8
-	type logContext struct {
-		TaskID  string `json:"task_id"`
-		TraceID string `json:"trace_id"`
-	}
-	contexts := make([]logContext, 0, taskCount)
-	for i := 0; i < taskCount; i++ {
-		id, trace := s.submitWithTrace(t, fmt.Sprintf("log-context-%d", i), "text/plain", fmt.Sprintf("private-body-%d", i))
-		contexts = append(contexts, logContext{TaskID: id, TraceID: trace})
-	}
-	for _, item := range contexts {
-		task := s.wait(t, item.TaskID, "DELIVERED")
-		if task.Notification.HTTPAttempts != 1 {
-			t.Fatalf("task %s attempts=%d", item.TaskID, task.Notification.HTTPAttempts)
-		}
-	}
-	stats := s.stats(t)
-	if stats.Count != taskCount || stats.MaxInFlight < 2 || stats.MaxInFlight > 4 {
-		t.Fatalf("bounded parallel mock calls mismatch: calls=%d max_in_flight=%d", stats.Count, stats.MaxInFlight)
-	}
-	control := os.Getenv("TEST_CONTROL_DIR")
-	if control == "" {
-		t.Fatal("TEST_CONTROL_DIR is required for the host log-context assertion")
-	}
-	var rows strings.Builder
-	for _, item := range contexts {
-		fmt.Fprintf(&rows, "%s\t%s\n", item.TaskID, item.TraceID)
-	}
-	if err := os.WriteFile(filepath.Join(control, "log-context.tsv"), []byte(rows.String()), 0600); err != nil {
-		t.Fatal(err)
-	}
-	s.record("concurrent_tasks_keep_trace_and_task_context_paired", map[string]any{"tasks": contexts, "mock_calls": stats.Count, "max_in_flight": stats.MaxInFlight, "configured_consumer_concurrency": 4})
-}
-
-type retryObserver struct {
-	messages chan *primitive.MessageExt
-	stopFn   func() error
-}
-
-func (o *retryObserver) stop() error { return o.stopFn() }
-
-func (s *suite) observeRetryTopic(t *testing.T) *retryObserver {
+func (s *suite) wait(t *testing.T, taskID, want string, timeout time.Duration) taskView {
 	t.Helper()
-	ns, err := resolveNameServer(env(t, "ROCKETMQ_NAMESRV"))
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		view := s.task(t, taskID)
+		if view.Notification.Status == want {
+			return view
+		}
+		switch view.Notification.Status {
+		case "DELIVERED", "FAILED", "FAST_FAILED", "EXPIRED", "UNCERTAIN":
+			t.Fatalf("task reached %s, want %s (reason=%s)", view.Notification.Status, want, view.Notification.Reason)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("task %s did not reach %s within %s", taskID, want, timeout)
+	return taskView{}
+}
+
+func (s *suite) task(t *testing.T, taskID string) taskView {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, s.api+"/api/v1/notifications/"+taskID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolver := primitive.NewPassthroughResolver([]string{ns})
+	response := s.doAPI(t, request, false)
+	defer response.Body.Close()
+	var view taskView
+	if err := json.NewDecoder(io.LimitReader(response.Body, 64*1024)).Decode(&view); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("notification query status=%d", response.StatusCode)
+	}
+	return view
+}
+
+func (s *suite) signedRequest(t *testing.T, method, path string, body []byte, admin bool) *http.Request {
+	t.Helper()
+	request, err := http.NewRequest(method, s.api+path, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if admin {
+		request.Header.Set("Authorization", "Bearer "+s.admin)
+		if _, err := signature.SignRequest(request, s.adminKeyID, s.adminKey, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		request.Header.Set("Authorization", "Bearer "+s.token)
+		if _, err := signature.SignRequest(request, s.clientKeyID, s.clientKey, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return request
+}
+
+func (s *suite) doAPI(t *testing.T, request *http.Request, admin bool) *http.Response {
+	t.Helper()
+	if admin {
+		request.Header.Set("Authorization", "Bearer "+s.admin)
+		if _, err := signature.SignRequest(request, s.adminKeyID, s.adminKey, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		request.Header.Set("Authorization", "Bearer "+s.token)
+		if _, err := signature.SignRequest(request, s.clientKeyID, s.clientKey, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	response, err := s.client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
+func (s *suite) fastFail(t *testing.T, enabled bool) {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{"enabled": enabled, "reason": "integration controlled switch"})
+	request, _ := http.NewRequest(http.MethodPatch, s.api+"/api/v1/admin/destinations/mock-target/fast-fail", bytes.NewReader(body))
+	response := s.doAPI(t, request, true)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("fast-fail update status=%d", response.StatusCode)
+	}
+}
+
+func (s *suite) resolve(t *testing.T, taskID, conclusion string) error {
+	t.Helper()
+	body, _ := json.Marshal(map[string]string{"conclusion": conclusion})
+	request, _ := http.NewRequest(http.MethodPost, s.api+"/api/v1/admin/notifications/"+taskID+"/resolve", bytes.NewReader(body))
+	response := s.doAPI(t, request, true)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("resolve status=%d", response.StatusCode)
+	}
+	return nil
+}
+
+func (s *suite) reset(t *testing.T) {
+	t.Helper()
+	request, _ := http.NewRequest(http.MethodPost, s.mock+"/control/reset", nil)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("mock reset status=%d", response.StatusCode)
+	}
+}
+
+func (s *suite) configure(t *testing.T, statuses []int, delayMS int) {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{"statuses": statuses, "delay_ms": delayMS, "response_body": "controlled"})
+	request, _ := http.NewRequest(http.MethodPost, s.mock+"/control/configure", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("mock configure status=%d", response.StatusCode)
+	}
+}
+
+func (s *suite) stats(t *testing.T) statsView {
+	t.Helper()
+	response, err := http.Get(s.mock + "/control/stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var stats statsView
+	if err := json.NewDecoder(response.Body).Decode(&stats); err != nil {
+		t.Fatal(err)
+	}
+	return stats
+}
+
+func (s *suite) observeRetries(t *testing.T) *retryObserver {
+	t.Helper()
+	resolver, err := resolveNameServer(env(t, "ROCKETMQ_NAMESRV"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	client, err := rocketmq.NewPushConsumer(
 		consumer.WithGroupName("notification_retry_audit"),
-		consumer.WithNsResolver(resolver),
-		consumer.WithConsumeMessageBatchMaxSize(1), consumer.WithPullBatchSize(1), consumer.WithConsumeGoroutineNums(1),
-		consumer.WithMaxReconsumeTimes(0),
+		consumer.WithNsResolver(primitive.NewPassthroughResolver([]string{resolver})),
+		consumer.WithConsumeMessageBatchMaxSize(1), consumer.WithPullBatchSize(1), consumer.WithConsumeGoroutineNums(1), consumer.WithMaxReconsumeTimes(0),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	observer := &retryObserver{messages: make(chan *primitive.MessageExt, 16), stopFn: client.Shutdown}
-	if err := client.Subscribe("%RETRY%notification_delivery_workers", consumer.MessageSelector{}, func(_ context.Context, messages ...*primitive.MessageExt) (consumer.ConsumeResult, error) {
+	observer := &retryObserver{messages: make(chan *primitive.MessageExt, 64), consumer: client}
+	if err := client.Subscribe("%RETRY%"+env(t, "TEST_CONSUMER_GROUP"), consumer.MessageSelector{}, func(_ context.Context, messages ...*primitive.MessageExt) (consumer.ConsumeResult, error) {
 		for _, message := range messages {
 			select {
 			case observer.messages <- message:
@@ -1002,337 +963,125 @@ func (s *suite) observeRetryTopic(t *testing.T) *retryObserver {
 	if err := client.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = observer.stop() })
+	t.Cleanup(func() { _ = client.Shutdown() })
 	return observer
 }
 
-func (o *retryObserver) waitTask(t *testing.T, taskID string, timeout time.Duration) *primitive.MessageExt {
+func (s *suite) observeDLQ(t *testing.T) *dlqObserver {
+	t.Helper()
+	resolver, err := resolveNameServer(env(t, "ROCKETMQ_NAMESRV"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := rocketmq.NewPushConsumer(
+		consumer.WithGroupName("notification_dlq_audit"),
+		consumer.WithNsResolver(primitive.NewPassthroughResolver([]string{resolver})),
+		consumer.WithConsumeMessageBatchMaxSize(1), consumer.WithPullBatchSize(1), consumer.WithConsumeGoroutineNums(1), consumer.WithMaxReconsumeTimes(0),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer := &dlqObserver{messages: make(chan *primitive.MessageExt, 64), consumer: client}
+	topic := "%DLQ%" + env(t, "TEST_CONSUMER_GROUP")
+	if err := client.Subscribe(topic, consumer.MessageSelector{}, func(_ context.Context, messages ...*primitive.MessageExt) (consumer.ConsumeResult, error) {
+		for _, message := range messages {
+			select {
+			case observer.messages <- message:
+			default:
+			}
+		}
+		return consumer.ConsumeSuccess, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Shutdown() })
+	return observer
+}
+
+func (o *retryObserver) wait(t *testing.T, eventID string, timeout time.Duration) *primitive.MessageExt {
+	t.Helper()
+	return waitRocketEvent(t, o.messages, eventID, timeout)
+}
+
+func (o *dlqObserver) waitEvent(t *testing.T, eventID string, timeout time.Duration) *primitive.MessageExt {
+	t.Helper()
+	return waitRocketEvent(t, o.messages, eventID, timeout)
+}
+
+func (o *dlqObserver) waitBody(t *testing.T, want []byte, timeout time.Duration) *primitive.MessageExt {
 	t.Helper()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	for {
 		select {
 		case message := <-o.messages:
-			var event struct {
-				TaskID string `json:"task_id"`
-			}
-			if json.Unmarshal(message.Body, &event) == nil && event.TaskID == taskID {
+			if bytes.Equal(message.Body, want) {
 				return message
 			}
 		case <-timer.C:
-			t.Fatalf("task %s did not appear on RocketMQ retry topic within %s", taskID, timeout)
+			t.Fatalf("message did not arrive on native DLQ within %s", timeout)
 		}
 	}
 }
 
-func (s *suite) testNativeDLQ(t *testing.T) {
-	ns, err := resolveNameServer(env(t, "ROCKETMQ_NAMESRV"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	resolver := primitive.NewPassthroughResolver([]string{ns})
-	dlq := make(chan *primitive.MessageExt, 1)
-	c, err := rocketmq.NewPushConsumer(
-		consumer.WithGroupName("notification_dlq_audit"),
-		consumer.WithNsResolver(resolver),
-		consumer.WithConsumeMessageBatchMaxSize(1),
-		consumer.WithPullBatchSize(1),
-		consumer.WithConsumeGoroutineNums(1),
-		consumer.WithMaxReconsumeTimes(0),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := c.Shutdown(); err != nil {
-			t.Errorf("shutdown DLQ observer: %v", err)
-		}
-	})
-	dlqTopic := "%DLQ%notification_delivery_workers"
-	if err := c.Subscribe(dlqTopic, consumer.MessageSelector{}, func(_ context.Context, messages ...*primitive.MessageExt) (consumer.ConsumeResult, error) {
-		if len(messages) != 1 {
-			return consumer.ConsumeRetryLater, fmt.Errorf("DLQ callback received %d messages", len(messages))
-		}
-		select {
-		case dlq <- messages[0]:
-		default:
-		}
-		return consumer.ConsumeSuccess, nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.Start(); err != nil {
-		t.Fatal(err)
-	}
-	p, err := rocketmq.NewProducer(producer.WithGroupName("notification_integration_poison"), producer.WithNsResolver(resolver), producer.WithRetry(0), producer.WithSendMsgTimeout(5*time.Second))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := p.Start(); err != nil {
-		t.Fatal(err)
-	}
-	event := map[string]string{"event_id": "integration-native-dlq", "task_id": "missing-task-for-dlq", "trace_id": "integration-dlq"}
-	body, _ := json.Marshal(event)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	result, err := p.SendSync(ctx, primitive.NewMessage(env(t, "ROCKETMQ_TOPIC"), body))
-	cancel()
-	shutdownErr := p.Shutdown()
-	if err != nil || result == nil || result.Status != primitive.SendOK {
-		t.Fatalf("poison message send was not confirmed: result=%v error=%v shutdown=%v", result, err, shutdownErr)
-	}
-	timer := time.NewTimer(3 * time.Minute)
+func waitRocketEvent(t *testing.T, messages <-chan *primitive.MessageExt, eventID string, timeout time.Duration) *primitive.MessageExt {
+	t.Helper()
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
-	select {
-	case message := <-dlq:
-		if message == nil || message.Topic != dlqTopic {
-			t.Fatalf("unexpected dead letter: %#v", message)
-		}
-		s.record("rocketmq_native_retries_reach_dlq", map[string]any{"topic": message.Topic, "reconsume_times": message.ReconsumeTimes, "msg_id": message.MsgId})
-	case <-timer.C:
-		t.Fatal("native RocketMQ retry did not reach DLQ within three minutes")
-	}
-}
-
-func (s *suite) submit(t *testing.T, key, contentType, body string) string {
-	id, _ := s.submitWithTrace(t, key, contentType, body)
-	return id
-}
-
-func (s *suite) submitWithTrace(t *testing.T, key, contentType, body string) (string, string) {
-	t.Helper()
-	payload, _ := json.Marshal(map[string]any{"destination_id": "mock-target", "method": "POST", "headers": map[string]string{"Content-Type": contentType}, "body": body})
-	code, data := s.post(t, "/api/v1/notifications", payload, key)
-	if code != http.StatusAccepted {
-		t.Fatalf("create status=%d body=%s", code, data)
-	}
-	var result struct {
-		ID      string `json:"task_id"`
-		TraceID string `json:"trace_id"`
-	}
-	if err := json.Unmarshal(data, &result); err != nil {
-		t.Fatal(err)
-	}
-	if result.ID == "" {
-		t.Fatal("missing task_id")
-	}
-	if result.TraceID == "" {
-		t.Fatal("missing trace_id")
-	}
-	return result.ID, result.TraceID
-}
-
-func (s *suite) create(t *testing.T, key, body string) (int, []byte) {
-	t.Helper()
-	payload, _ := json.Marshal(map[string]any{"destination_id": "mock-target", "method": "POST", "headers": map[string]string{"Content-Type": "application/json"}, "body": body})
-	return s.post(t, "/api/v1/notifications", payload, key)
-}
-
-func (s *suite) newSignedRequest(t *testing.T, method, path string, body []byte, idempotencyKey string, admin bool) *http.Request {
-	t.Helper()
-	req, err := http.NewRequest(method, s.api+path, bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if idempotencyKey != "" {
-		req.Header.Set("Idempotency-Key", idempotencyKey)
-	}
-	if admin {
-		req.Header.Set("Authorization", "Bearer "+s.admin)
-		if _, err := signature.SignRequest(req, s.adminKeyID, s.adminKey, time.Now()); err != nil {
-			t.Fatal(err)
-		}
-	} else {
-		req.Header.Set("Authorization", "Bearer "+s.token)
-		if _, err := signature.SignRequest(req, s.clientKeyID, s.clientKey, time.Now()); err != nil {
-			t.Fatal(err)
+	for {
+		select {
+		case message := <-messages:
+			var event mq.IngressEvent
+			if json.Unmarshal(message.Body, &event) == nil && event.EventID == eventID {
+				return message
+			}
+		case <-timer.C:
+			t.Fatalf("event %s did not arrive on RocketMQ retry/DLQ topic within %s", eventID, timeout)
 		}
 	}
-	return req
 }
 
-func (s *suite) doAPI(t *testing.T, req *http.Request, admin bool) *http.Response {
-	t.Helper()
-	if admin {
-		req.Header.Set("Authorization", "Bearer "+s.admin)
-		if _, err := signature.SignRequest(req, s.adminKeyID, s.adminKey, time.Now()); err != nil {
-			t.Fatal(err)
-		}
-	} else {
-		req.Header.Set("Authorization", "Bearer "+s.token)
-		if _, err := signature.SignRequest(req, s.clientKeyID, s.clientKey, time.Now()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	resp, err := s.client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return resp
+func (s *suite) record(name string, details map[string]any) {
+	s.report = append(s.report, map[string]any{"name": name, "passed": true, "details": details})
 }
 
-func (s *suite) post(t *testing.T, path string, body []byte, key string) (int, []byte) {
-	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, s.api+path, bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
+func (s *suite) writeReport() {
+	path := os.Getenv("TEST_REPORT")
+	if path == "" {
+		return
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Idempotency-Key", key)
-	resp := s.doAPI(t, req, false)
-	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
+	_ = os.MkdirAll(filepath.Dir(path), 0755)
+	raw, err := json.MarshalIndent(map[string]any{"scenarios": s.report}, "", "  ")
+	if err == nil {
+		_ = os.WriteFile(path, raw, 0644)
 	}
-	return resp.StatusCode, data
 }
 
-func (s *suite) task(t *testing.T, id string) taskView {
-	t.Helper()
-	req, _ := http.NewRequest(http.MethodGet, s.api+"/api/v1/notifications/"+id, nil)
-	resp := s.doAPI(t, req, false)
-	defer resp.Body.Close()
-	var v taskView
-	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
-		t.Fatal(err)
+func (s *suite) saveContexts() {
+	path := os.Getenv("TEST_CONTROL_DIR")
+	if path == "" {
+		return
 	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("get task status=%d", resp.StatusCode)
+	var content strings.Builder
+	for _, pair := range s.contexts {
+		fmt.Fprintf(&content, "%s\t%s\n", pair[0], pair[1])
 	}
-	return v
+	_ = os.WriteFile(filepath.Join(path, "log-context.tsv"), []byte(content.String()), 0600)
 }
 
-func (s *suite) wait(t *testing.T, id, want string) taskView {
+func waitForFile(t *testing.T, path string, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(45 * time.Second)
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		v := s.task(t, id)
-		if v.Notification.Status == want {
-			return v
+		if _, err := os.Stat(path); err == nil {
+			return
 		}
-		switch v.Notification.Status {
-		case "DELIVERED", "FAILED", "FAST_FAILED", "EXPIRED", "UNCERTAIN":
-			t.Fatalf("task reached %s, want %s (%s)", v.Notification.Status, want, v.Notification.Reason)
-		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("timeout waiting for %s", want)
-	return taskView{}
-}
-
-func (s *suite) stats(t *testing.T) statsView {
-	t.Helper()
-	resp, err := s.client.Get(s.mock + "/control/stats")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	var v statsView
-	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
-		t.Fatal(err)
-	}
-	return v
-}
-
-func (s *suite) reset(t *testing.T) {
-	t.Helper()
-	req, _ := http.NewRequest(http.MethodPost, s.mock+"/control/reset", nil)
-	resp, err := s.client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("reset status=%d", resp.StatusCode)
-	}
-}
-
-func (s *suite) configure(t *testing.T, statuses []int) {
-	s.configureDelay(t, statuses, 0)
-}
-
-func (s *suite) configureDelay(t *testing.T, statuses []int, delayMS int) {
-	t.Helper()
-	body, _ := json.Marshal(map[string]any{"statuses": statuses, "delay_ms": delayMS, "response_body": "controlled"})
-	req, _ := http.NewRequest(http.MethodPost, s.mock+"/control/configure", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := s.client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("configure status=%d", resp.StatusCode)
-	}
-}
-
-func (s *suite) fastFail(t *testing.T, enabled bool) {
-	t.Helper()
-	body, _ := json.Marshal(map[string]any{"enabled": enabled, "reason": "integration test"})
-	req, _ := http.NewRequest(http.MethodPatch, s.api+"/api/v1/admin/destinations/mock-target/fast-fail", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	resp := s.doAPI(t, req, true)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("fast-fail status=%d", resp.StatusCode)
-	}
-	var actor string
-	if err := s.db.QueryRow(`SELECT updated_by FROM destination WHERE destination_id='mock-target'`).Scan(&actor); err != nil {
-		t.Fatal(err)
-	}
-	if actor != env(t, "TEST_ADMIN_ACTOR") {
-		t.Fatalf("fast-fail audit actor=%q, want configured actor %q", actor, env(t, "TEST_ADMIN_ACTOR"))
-	}
-}
-
-func (s *suite) configureRetryAfter(t *testing.T, statuses []int, retryAfter string) {
-	t.Helper()
-	body, _ := json.Marshal(map[string]any{"statuses": statuses, "retry_after": retryAfter, "response_body": "controlled"})
-	req, _ := http.NewRequest(http.MethodPost, s.mock+"/control/configure", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := s.client.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("configure Retry-After status=%d", resp.StatusCode)
-	}
-}
-
-func (s *suite) republish(taskID string) error {
-	var event struct {
-		EventID string `json:"event_id"`
-		TaskID  string `json:"task_id"`
-		TraceID string `json:"trace_id"`
-	}
-	if err := s.db.QueryRow("SELECT event_id,task_id,trace_id FROM outbox WHERE task_id=?", taskID).Scan(&event.EventID, &event.TaskID, &event.TraceID); err != nil {
-		return err
-	}
-	body, err := json.Marshal(event)
-	if err != nil {
-		return err
-	}
-	ns, err := resolveNameServer(env(s.t, "ROCKETMQ_NAMESRV"))
-	if err != nil {
-		return err
-	}
-	resolver := primitive.NewPassthroughResolver([]string{ns})
-	p, err := rocketmq.NewProducer(producer.WithGroupName("notification_integration_duplicate"), producer.WithNsResolver(resolver), producer.WithRetry(0), producer.WithSendMsgTimeout(5*time.Second))
-	if err != nil {
-		return err
-	}
-	if err = p.Start(); err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	result, err := p.SendSync(ctx, primitive.NewMessage(env(s.t, "ROCKETMQ_TOPIC"), body))
-	if err == nil && (result == nil || result.Status != primitive.SendOK) {
-		err = fmt.Errorf("duplicate not confirmed: %v", result)
-	}
-	return errors.Join(err, p.Shutdown())
+	t.Fatalf("control marker was not found: %s", filepath.Base(path))
 }
 
 func resolveNameServer(address string) (string, error) {
@@ -1355,25 +1104,20 @@ func resolveNameServer(address string) (string, error) {
 	return "", fmt.Errorf("no IP address for %q", host)
 }
 
-func (s *suite) record(name string, details map[string]any) {
-	s.report = append(s.report, map[string]any{"name": name, "passed": true, "details": details})
-}
-func (s *suite) writeReport() {
-	path := os.Getenv("TEST_REPORT")
-	if path == "" {
-		return
+func shortID() string { return fmt.Sprintf("%x", time.Now().UnixNano()) }
+
+func safeOutput(output []byte) string {
+	if len(output) > 300 {
+		output = output[:300]
 	}
-	_ = os.MkdirAll(filepath.Dir(path), 0755)
-	raw, err := json.MarshalIndent(map[string]any{"scenarios": s.report}, "", "  ")
-	if err == nil {
-		_ = os.WriteFile(path, raw, 0644)
-	}
+	return strings.TrimSpace(string(output))
 }
+
 func env(t *testing.T, key string) string {
 	t.Helper()
-	v := os.Getenv(key)
-	if v == "" {
+	value := os.Getenv(key)
+	if value == "" {
 		t.Fatalf("%s is required", key)
 	}
-	return v
+	return value
 }
